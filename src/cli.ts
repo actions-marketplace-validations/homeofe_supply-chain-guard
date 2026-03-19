@@ -3,14 +3,16 @@
 /**
  * supply-chain-guard CLI
  *
- * Scan code repositories, npm packages, and VS Code extensions
- * for supply-chain malware indicators.
+ * Scan code repositories, npm packages, PyPI packages, VS Code extensions,
+ * and project dependencies for supply-chain malware indicators.
  */
 
 import { Command } from "commander";
 import { scan } from "./scanner.js";
 import { scanNpmPackage } from "./npm-scanner.js";
 import { scanPypiPackage } from "./pypi-scanner.js";
+import { scanVscodeExtension } from "./vscode-scanner.js";
+import { scanDependencyConfusion } from "./dependency-confusion.js";
 import { monitorWallet, formatAlert, checkWallet } from "./solana-monitor.js";
 import { formatReport } from "./reporter.js";
 import type { ScanOptions, Severity } from "./types.js";
@@ -20,7 +22,7 @@ const program = new Command();
 program
   .name("supply-chain-guard")
   .description(
-    "Open-source supply-chain security scanner. Detects GlassWorm and similar malware campaigns in npm packages, code repos, and VS Code extensions.",
+    "Open-source supply-chain security scanner. Detects GlassWorm and similar malware campaigns in npm packages, PyPI packages, code repos, VS Code extensions, and project dependencies.",
   )
   .version("1.0.0");
 
@@ -137,6 +139,89 @@ program
           target: packageName,
           format: opts.format as "text" | "json" | "markdown",
           minSeverity: opts.minSeverity as Severity | undefined,
+        });
+
+        console.log(formatReport(report, opts.format as "text" | "json" | "markdown"));
+
+        if (report.summary.critical > 0) {
+          process.exit(2);
+        }
+        if (report.summary.high > 0) {
+          process.exit(1);
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`\n  Error: ${message}\n`);
+        process.exit(1);
+      }
+    },
+  );
+
+// ── vscode command ──────────────────────────────────────────────────
+
+program
+  .command("vscode")
+  .description("Scan a VS Code extension (.vsix file or marketplace ID) for malware indicators")
+  .argument(
+    "<target>",
+    "Path to .vsix file or marketplace extension ID (e.g., publisher.extension-name)",
+  )
+  .option("-f, --format <format>", "Output format: text, json, markdown", "text")
+  .option(
+    "-s, --min-severity <severity>",
+    "Minimum severity to report",
+  )
+  .action(
+    async (
+      target: string,
+      opts: { format: string; minSeverity?: string },
+    ) => {
+      try {
+        const report = await scanVscodeExtension({
+          target,
+          format: opts.format as "text" | "json" | "markdown",
+          minSeverity: opts.minSeverity as Severity | undefined,
+        });
+
+        console.log(formatReport(report, opts.format as "text" | "json" | "markdown"));
+
+        if (report.summary.critical > 0) {
+          process.exit(2);
+        }
+        if (report.summary.high > 0) {
+          process.exit(1);
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`\n  Error: ${message}\n`);
+        process.exit(1);
+      }
+    },
+  );
+
+// ── confusion command ───────────────────────────────────────────────
+
+program
+  .command("confusion")
+  .description("Detect dependency confusion risks in a project's package.json")
+  .argument("<target>", "Path to project directory or package.json file")
+  .option("-f, --format <format>", "Output format: text, json, markdown", "text")
+  .option(
+    "-s, --min-severity <severity>",
+    "Minimum severity to report",
+  )
+  .option("--no-dev", "Exclude devDependencies from the check")
+  .action(
+    async (
+      target: string,
+      opts: { format: string; minSeverity?: string; dev: boolean },
+    ) => {
+      try {
+        const report = await scanDependencyConfusion({
+          target,
+          format: opts.format as "text" | "json" | "markdown",
+          minSeverity: opts.minSeverity as Severity | undefined,
+          includeDevDeps: opts.dev,
         });
 
         console.log(formatReport(report, opts.format as "text" | "json" | "markdown"));
