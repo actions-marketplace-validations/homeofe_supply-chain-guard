@@ -16,7 +16,12 @@ import {
   SUSPICIOUS_SCRIPTS,
   SCANNABLE_EXTENSIONS,
   MAX_FILE_SIZE,
+  BINARY_EXTENSIONS,
+  BINARY_DOWNLOAD_PATTERNS,
+  KNOWN_NATIVE_PACKAGES,
+  BEACON_MINER_PATTERNS,
 } from "./patterns.js";
+import { checkLockfile } from "./lockfile-checker.js";
 
 const TOOL_VERSION = "1.0.0";
 
@@ -68,6 +73,11 @@ export async function scan(options: ScanOptions): Promise<ScanReport> {
     // Check suspicious file names
     checkSuspiciousFileName(basename, relativePath, findings);
 
+    // Check for unexpected binary/native addon files (T-007)
+    if (BINARY_EXTENSIONS.has(ext)) {
+      checkBinaryFile(relativePath, findings);
+    }
+
     // Only scan content of known file types
     if (!SCANNABLE_EXTENSIONS.has(ext)) continue;
 
@@ -83,9 +93,14 @@ export async function scan(options: ScanOptions): Promise<ScanReport> {
       // Check file content patterns
       checkFilePatterns(content, relativePath, findings);
 
+      // Check beacon and miner patterns (T-008)
+      checkBeaconMinerPatterns(content, relativePath, findings);
+
       // Check package.json specifically
       if (basename === "package.json") {
         checkPackageJson(content, relativePath, findings);
+        // Check for binary download patterns in install scripts (T-007)
+        checkBinaryDownloadScripts(content, relativePath, findings);
       }
     } catch {
       // Skip files that can't be read (binary, permissions, etc.)
@@ -96,6 +111,10 @@ export async function scan(options: ScanOptions): Promise<ScanReport> {
   if (fs.existsSync(path.join(scanDir, ".git"))) {
     checkGitDateAnomalies(scanDir, findings);
   }
+
+  // Check lockfile integrity (T-006)
+  const lockfileFindings = checkLockfile(scanDir);
+  findings.push(...lockfileFindings);
 
   // Filter by severity and excluded rules
   const filteredFindings = filterFindings(findings, options);
@@ -321,6 +340,174 @@ function checkGitDateAnomalies(dir: string, findings: Finding[]): void {
 }
 
 /**
+ * Check for unexpected binary/native addon files (T-007).
+ */
+function checkBinaryFile(relativePath: string, findings: Finding[]): void {
+  // Check if the binary belongs to a known native package
+  const parts = relativePath.split(path.sep);
+  const isKnownNative = parts.some((part) => KNOWN_NATIVE_PACKAGES.has(part));
+
+  if (isKnownNative) {
+    findings.push({
+      rule: "BINARY_KNOWN_NATIVE",
+      description: `Binary file "${relativePath}" belongs to a known native addon package.`,
+      severity: "info",
+      file: relativePath,
+      recommendation:
+        "This is expected for known native addon packages. Verify the package is intentionally included.",
+    });
+  } else {
+    findings.push({
+      rule: "BINARY_UNEXPECTED",
+      description: `Unexpected binary/native file detected: "${relativePath}". Binary files in npm packages are unusual unless the package is a known native addon.`,
+      severity: "high",
+      file: relativePath,
+      recommendation:
+        "Inspect this binary file. Legitimate npm packages rarely include precompiled binaries unless they are known native addon packages (e.g., sharp, better-sqlite3).",
+    });
+  }
+}
+
+/**
+ * Check package.json install scripts for binary download patterns (T-007).
+ */
+function checkBinaryDownloadScripts(
+  content: string,
+  relativePath: string,
+  findings: Finding[],
+): void {
+  let pkg: Record<string, unknown>;
+  try {
+    pkg = JSON.parse(content) as Record<string, unknown>;
+  } catch {
+    return;
+  }
+
+  const scripts = pkg.scripts as Record<string, string> | undefined;
+  if (!scripts) return;
+
+  const pkgName = (pkg.name as string) ?? "";
+  const isKnownNative = KNOWN_NATIVE_PACKAGES.has(pkgName);
+
+  const installHooks = ["preinstall", "postinstall", "install"];
+
+  for (const hook of installHooks) {
+    const script = scripts[hook];
+    if (!script) continue;
+
+    for (const pattern of BINARY_DOWNLOAD_PATTERNS) {
+      const regex = new RegExp(pattern.pattern, "i");
+      if (regex.test(script)) {
+        findings.push({
+          rule: pattern.rule,
+          description: `${hook}: ${pattern.description}${isKnownNative ? " (known native package)" : ""}`,
+          severity: isKnownNative ? "info" : pattern.severity,
+          file: relativePath,
+          match: truncateMatch(`${hook}: ${script}`),
+          recommendation: isKnownNative
+            ? `This is expected for ${pkgName}. Native packages commonly download prebuilt binaries.`
+            : `Review the ${hook} script. Binary downloads in install scripts can be a supply-chain attack vector.`,
+        });
+      }
+    }
+  }
+}
+
+/**
+ * Scan file content for beacon and crypto miner patterns (T-008).
+ */
+function checkBeaconMinerPatterns(
+  content: string,
+  relativePath: string,
+  findings: Finding[],
+): void {
+  const lines = content.split("\n");
+
+  for (const pattern of BEACON_MINER_PATTERNS) {
+    const regex = new RegExp(pattern.pattern, "gi");
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i] ?? "";
+      const match = regex.exec(line);
+      if (match) {
+        findings.push({
+          rule: pattern.rule,
+          description: pattern.description,
+          severity: pattern.severity,
+          file: relativePath,
+          line: i + 1,
+          match: truncateMatch(match[0]),
+          recommendation: getRecommendation(pattern.rule),
+        });
+        regex.lastIndex = 0;
+      }
+    }
+  }
+
+  // Multi-line protestware check: locale/timezone on one line, destructive on nearby lines
+  checkMultiLineProtestware(content, relativePath, findings);
+}
+
+/**
+ * Check for protestware patterns spanning multiple lines.
+ * Looks for locale/timezone checks within 15 lines of destructive operations.
+ */
+function checkMultiLineProtestware(
+  content: string,
+  relativePath: string,
+  findings: Finding[],
+): void {
+  const lines = content.split("\n");
+  const PROXIMITY = 15;
+
+  const localePattern =
+    /(?:locale|timezone|timeZone|Intl\.DateTimeFormat|getTimezone|country_code|country_name)/i;
+  const destructivePattern =
+    /(?:fs\.(?:rm|rmdir|unlink|writeFile)|process\.exit|child_process|execSync|rimraf|fs\.rmdirSync|fs\.unlinkSync|fs\.rmSync)/i;
+
+  const localeLines: number[] = [];
+  const destructiveLines: number[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    if (localePattern.test(line)) localeLines.push(i);
+    if (destructivePattern.test(line)) destructiveLines.push(i);
+  }
+
+  // Check if any locale line is within PROXIMITY of a destructive line
+  for (const localeLine of localeLines) {
+    for (const destructiveLine of destructiveLines) {
+      if (
+        Math.abs(localeLine - destructiveLine) <= PROXIMITY &&
+        localeLine !== destructiveLine
+      ) {
+        // Avoid duplicating if we already found a single-line match
+        const alreadyFound = findings.some(
+          (f) =>
+            f.rule === "PROTESTWARE_LOCALE_DESTRUCT" &&
+            f.file === relativePath,
+        );
+        if (!alreadyFound) {
+          findings.push({
+            rule: "PROTESTWARE_PROXIMITY",
+            description: `Locale/timezone check (line ${localeLine + 1}) found near destructive code (line ${destructiveLine + 1}). This proximity pattern is common in protestware.`,
+            severity: "high",
+            file: relativePath,
+            line: localeLine + 1,
+            match: truncateMatch(
+              `locale: "${(lines[localeLine] ?? "").trim()}" ... destruct: "${(lines[destructiveLine] ?? "").trim()}"`,
+            ),
+            recommendation:
+              "Review the surrounding code. Protestware uses locale/geo checks to selectively destroy data or crash for targeted users.",
+          });
+        }
+        return; // One finding per file is enough
+      }
+    }
+  }
+}
+
+/**
  * Filter findings based on scan options.
  */
 function filterFindings(findings: Finding[], options: ScanOptions): Finding[] {
@@ -464,6 +651,64 @@ function generateRecommendations(findings: Finding[]): string[] {
     );
   }
 
+  // Lockfile recommendations (T-006)
+  if (
+    rules.has("LOCKFILE_MISSING_INTEGRITY") ||
+    rules.has("LOCKFILE_INVALID_INTEGRITY") ||
+    rules.has("LOCKFILE_SHORT_INTEGRITY")
+  ) {
+    recommendations.push(
+      "Lockfile integrity issues detected. Run `npm install` with a modern npm version to regenerate integrity hashes.",
+    );
+  }
+  if (rules.has("LOCKFILE_HTTP_RESOLVED")) {
+    recommendations.push(
+      "Packages resolving over plain HTTP detected. Update resolved URLs to HTTPS to prevent MITM attacks.",
+    );
+  }
+  if (rules.has("LOCKFILE_VERSION_DOWNGRADE")) {
+    recommendations.push(
+      "Lockfile uses an outdated version. Upgrade with `npm install` using npm 7+ for stronger security guarantees.",
+    );
+  }
+
+  // Binary detection recommendations (T-007)
+  if (rules.has("BINARY_UNEXPECTED")) {
+    recommendations.push(
+      "Unexpected binary files detected. Inspect them carefully. Legitimate npm packages rarely ship precompiled binaries.",
+    );
+  }
+  if (rules.has("BINARY_DIRECT_DOWNLOAD")) {
+    recommendations.push(
+      "Install scripts download binary files directly. This is a supply-chain risk. Verify the download source.",
+    );
+  }
+
+  // Beacon/miner recommendations (T-008)
+  if (
+    rules.has("MINER_STRATUM_PROTOCOL") ||
+    rules.has("MINER_POOL_DOMAIN") ||
+    rules.has("MINER_LIBRARY_REF")
+  ) {
+    recommendations.push(
+      "CRITICAL: Cryptocurrency miner indicators detected. This package likely contains a hidden miner. Do NOT install.",
+    );
+  }
+  if (rules.has("BEACON_INTERVAL_FETCH") || rules.has("BEACON_TIMEOUT_FETCH")) {
+    recommendations.push(
+      "Network beacon patterns detected. Periodic outbound requests may indicate C2 communication or data exfiltration.",
+    );
+  }
+  if (
+    rules.has("PROTESTWARE_LOCALE_DESTRUCT") ||
+    rules.has("PROTESTWARE_GEOIP_DESTRUCT") ||
+    rules.has("PROTESTWARE_PROXIMITY")
+  ) {
+    recommendations.push(
+      "CRITICAL: Protestware patterns detected. This code targets users by geographic location with destructive operations.",
+    );
+  }
+
   if (recommendations.length === 0 && findings.length > 0) {
     recommendations.push(
       "Review the listed findings and assess whether they represent legitimate functionality or potential threats.",
@@ -534,6 +779,30 @@ function getRecommendation(rule: string): string {
       "sdd.dll is the payload from the coa/rc npm hijack. This is a critical indicator of compromise.",
     COA_RC_POSTINSTALL:
       "Encoded postinstall payloads match the coa/rc npm hijack pattern. Pin dependencies and audit install scripts.",
+    BEACON_INTERVAL_FETCH:
+      "Periodic network requests (setInterval + fetch) can be C2 beacons. Verify this is legitimate functionality.",
+    BEACON_TIMEOUT_FETCH:
+      "Delayed network requests may be beacons with jitter. Investigate the target URL.",
+    MINER_STRATUM_PROTOCOL:
+      "Stratum protocol is exclusively used for cryptocurrency mining. This is a strong malware indicator.",
+    MINER_POOL_DOMAIN:
+      "Known mining pool domain detected. Do not run this code.",
+    MINER_CONFIG_KEYS:
+      "Mining configuration parameters detected. This code may be configuring a cryptocurrency miner.",
+    MINER_LIBRARY_REF:
+      "Cryptocurrency miner library referenced. Do not run this code.",
+    BEACON_WEBSOCKET_EXTERNAL:
+      "WebSocket to external host detected. Verify this is expected for the package.",
+    PROTESTWARE_LOCALE_DESTRUCT:
+      "Protestware detected: locale/geo check combined with destructive operations. Do not run.",
+    PROTESTWARE_GEOIP_DESTRUCT:
+      "GeoIP-based protestware detected. Do not run this code.",
+    PROTESTWARE_PROXIMITY:
+      "Locale check near destructive code. Review carefully for protestware patterns.",
+    BINARY_UNEXPECTED:
+      "Unexpected binary file in package. Inspect with a hex editor or disassembler.",
+    BINARY_DIRECT_DOWNLOAD:
+      "Binary download in install script. Verify the download source is trusted.",
   };
 
   return map[rule] ?? "Review this finding manually and assess the risk.";

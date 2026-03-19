@@ -529,6 +529,182 @@ export const PYTHON_EXTENSIONS = new Set([
 ]);
 
 // ---------------------------------------------------------------------------
+// Binary / native addon detection (T-007)
+// ---------------------------------------------------------------------------
+
+/** File extensions that indicate binary/native addons */
+export const BINARY_EXTENSIONS = new Set([
+  ".node",
+  ".so",
+  ".dll",
+  ".dylib",
+  ".exe",
+  ".bin",
+]);
+
+/** Patterns in install scripts that indicate prebuilt binary downloads */
+export const BINARY_DOWNLOAD_PATTERNS: PatternEntry[] = [
+  {
+    name: "node-pre-gyp",
+    pattern: "node-pre-gyp\\s+install",
+    description: "node-pre-gyp prebuilt binary download detected in install script",
+    severity: "medium",
+    rule: "BINARY_PREGYP_DOWNLOAD",
+  },
+  {
+    name: "prebuild-install",
+    pattern: "prebuild-install|prebuildify",
+    description: "Prebuilt binary installer detected in install script",
+    severity: "medium",
+    rule: "BINARY_PREBUILD_INSTALL",
+  },
+  {
+    name: "binary-download-curl",
+    pattern:
+      "(?:curl|wget)\\s+.*\\.(?:node|so|dll|dylib|exe)(?:\\s|$|[\"'])",
+    description: "Install script downloads a binary/native file directly",
+    severity: "high",
+    rule: "BINARY_DIRECT_DOWNLOAD",
+  },
+  {
+    name: "node-gyp-rebuild",
+    pattern: "node-gyp\\s+rebuild",
+    description: "Native addon compilation via node-gyp detected",
+    severity: "low",
+    rule: "BINARY_NATIVE_COMPILE",
+  },
+];
+
+/** Known legitimate packages that use native addons */
+export const KNOWN_NATIVE_PACKAGES = new Set([
+  "better-sqlite3",
+  "sharp",
+  "canvas",
+  "bcrypt",
+  "argon2",
+  "sqlite3",
+  "node-sass",
+  "fsevents",
+  "esbuild",
+  "lightningcss",
+  "swc",
+  "@swc/core",
+  "turbo",
+  "@parcel/watcher",
+  "keytar",
+  "node-pty",
+  "bufferutil",
+  "utf-8-validate",
+  "cpu-features",
+  "microtime",
+  "farmhash",
+  "xxhash-addon",
+  "deasync",
+  "sodium-native",
+  "leveldown",
+  "lmdb",
+  "libsql",
+  "re2",
+  "node-datachannel",
+  "unix-dgram",
+]);
+
+// ---------------------------------------------------------------------------
+// Network beacon and crypto miner detection (T-008)
+// ---------------------------------------------------------------------------
+
+export const BEACON_MINER_PATTERNS: PatternEntry[] = [
+  // Beacon patterns: periodic network calls
+  {
+    name: "beacon-setinterval-fetch",
+    pattern:
+      "setInterval\\s*\\(.*(?:fetch|https?\\.(?:get|request)|axios|got|node-fetch|XMLHttpRequest)",
+    description:
+      "Periodic network request detected (setInterval + fetch). This is a common beacon pattern for C2 communication.",
+    severity: "high",
+    rule: "BEACON_INTERVAL_FETCH",
+  },
+  {
+    name: "beacon-settimeout-fetch",
+    pattern:
+      "setTimeout\\s*\\(.*(?:fetch|https?\\.(?:get|request)|axios|got|node-fetch)",
+    description:
+      "Delayed network request detected (setTimeout + fetch). May be a beacon with jitter.",
+    severity: "medium",
+    rule: "BEACON_TIMEOUT_FETCH",
+  },
+
+  // Crypto miner patterns
+  {
+    name: "stratum-protocol",
+    pattern:
+      "stratum\\+(?:tcp|ssl|tls)://",
+    description:
+      "Stratum mining pool protocol reference detected. This is used exclusively for cryptocurrency mining.",
+    severity: "critical",
+    rule: "MINER_STRATUM_PROTOCOL",
+  },
+  {
+    name: "mining-pool-domain",
+    pattern:
+      "(?:pool\\.|mining\\.|mine\\.|hashrate\\.).*\\.(?:com|org|net|io)|(?:nanopool|ethermine|f2pool|viabtc|antpool|poolin|slushpool|nicehash|minergate|hashflare|2miners|flexpool|ezil|hiveon)\\.(?:com|org|net|io)",
+    description:
+      "Known mining pool domain detected. This package may contain a cryptocurrency miner.",
+    severity: "critical",
+    rule: "MINER_POOL_DOMAIN",
+  },
+  {
+    name: "mining-config-keys",
+    pattern:
+      "(?:\"|\\'|`)(?:wallet|worker|pool_address|pool_password|mining_address|hashrate|coin|algo)(?:\"|\\'|`)\\s*:",
+    description:
+      "Mining configuration keys detected. This may be a cryptocurrency miner configuration.",
+    severity: "high",
+    rule: "MINER_CONFIG_KEYS",
+  },
+  {
+    name: "coinhive-reference",
+    pattern:
+      "coinhive|cryptonight|monero\\.(?:crypto|mine)|xmrig|xmr-stak",
+    description:
+      "Cryptocurrency miner library reference detected (CoinHive, XMRig, etc.).",
+    severity: "critical",
+    rule: "MINER_LIBRARY_REF",
+  },
+
+  // Suspicious WebSocket connections
+  {
+    name: "websocket-external",
+    pattern:
+      "new\\s+WebSocket\\s*\\(\\s*[\"'`]wss?://(?!localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0)",
+    description:
+      "WebSocket connection to external host detected. Verify this is expected for the package's functionality.",
+    severity: "medium",
+    rule: "BEACON_WEBSOCKET_EXTERNAL",
+  },
+
+  // Protestware patterns: locale/timezone checks + destructive actions
+  {
+    name: "protestware-locale-destructive",
+    pattern:
+      "(?:locale|timezone|timeZone|country|getTimezone|Intl\\.DateTimeFormat).*(?:fs\\.(?:rm|rmdir|unlink|writeFile)|process\\.exit|child_process|execSync|rimraf)",
+    description:
+      "Locale/timezone check followed by destructive code. This is a protestware pattern that targets users by geography.",
+    severity: "critical",
+    rule: "PROTESTWARE_LOCALE_DESTRUCT",
+  },
+  {
+    name: "protestware-geo-ip",
+    pattern:
+      "(?:geoip|ip-api|ipinfo|freegeoip|ipgeolocation).*(?:fs\\.(?:rm|rmdir|unlink)|process\\.exit|execSync)",
+    description:
+      "GeoIP lookup combined with destructive operations detected. This is a protestware/geo-targeted attack pattern.",
+    severity: "critical",
+    rule: "PROTESTWARE_GEOIP_DESTRUCT",
+  },
+];
+
+// ---------------------------------------------------------------------------
 // File extensions to scan
 // ---------------------------------------------------------------------------
 

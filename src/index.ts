@@ -10,6 +10,7 @@ export { scanNpmPackage } from "./npm-scanner.js";
 export { scanPypiPackage } from "./pypi-scanner.js";
 export { monitorWallet, checkWallet, formatAlert } from "./solana-monitor.js";
 export { formatReport } from "./reporter.js";
+export { checkLockfile } from "./lockfile-checker.js";
 export type {
   Finding,
   ScanReport,
