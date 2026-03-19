@@ -1,0 +1,192 @@
+#!/usr/bin/env node
+
+/**
+ * supply-chain-guard CLI
+ *
+ * Scan code repositories, npm packages, and VS Code extensions
+ * for supply-chain malware indicators.
+ */
+
+import { Command } from "commander";
+import { scan } from "./scanner.js";
+import { scanNpmPackage } from "./npm-scanner.js";
+import { monitorWallet, formatAlert, checkWallet } from "./solana-monitor.js";
+import { formatReport } from "./reporter.js";
+import type { ScanOptions, Severity } from "./types.js";
+
+const program = new Command();
+
+program
+  .name("supply-chain-guard")
+  .description(
+    "Open-source supply-chain security scanner. Detects GlassWorm and similar malware campaigns in npm packages, code repos, and VS Code extensions.",
+  )
+  .version("1.0.0");
+
+// ── scan command ────────────────────────────────────────────────────
+
+program
+  .command("scan")
+  .description("Scan a local directory or GitHub repo for malware indicators")
+  .argument("<target>", "Local directory path or GitHub repo URL")
+  .option("-f, --format <format>", "Output format: text, json, markdown", "text")
+  .option(
+    "-s, --min-severity <severity>",
+    "Minimum severity to report: critical, high, medium, low, info",
+  )
+  .option(
+    "-e, --exclude <rules>",
+    "Comma-separated list of rule IDs to exclude",
+  )
+  .option("-d, --depth <depth>", "Maximum directory depth", "20")
+  .action(
+    async (
+      target: string,
+      opts: {
+        format: string;
+        minSeverity?: string;
+        exclude?: string;
+        depth: string;
+      },
+    ) => {
+      try {
+        const options: ScanOptions = {
+          target,
+          format: opts.format as "text" | "json" | "markdown",
+          minSeverity: opts.minSeverity as Severity | undefined,
+          excludeRules: opts.exclude?.split(",").map((r) => r.trim()),
+          maxDepth: parseInt(opts.depth, 10),
+        };
+
+        const report = await scan(options);
+        console.log(formatReport(report, options.format));
+
+        // Exit with non-zero if critical findings
+        if (report.summary.critical > 0) {
+          process.exit(2);
+        }
+        if (report.summary.high > 0) {
+          process.exit(1);
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`\n  Error: ${message}\n`);
+        process.exit(1);
+      }
+    },
+  );
+
+// ── npm command ─────────────────────────────────────────────────────
+
+program
+  .command("npm")
+  .description("Scan an npm package for malware indicators (downloads without installing)")
+  .argument("<package>", "npm package name (e.g., express, lodash)")
+  .option("-f, --format <format>", "Output format: text, json, markdown", "text")
+  .option(
+    "-s, --min-severity <severity>",
+    "Minimum severity to report",
+  )
+  .action(
+    async (
+      packageName: string,
+      opts: { format: string; minSeverity?: string },
+    ) => {
+      try {
+        const report = await scanNpmPackage(packageName, {
+          target: packageName,
+          format: opts.format as "text" | "json" | "markdown",
+          minSeverity: opts.minSeverity as Severity | undefined,
+        });
+
+        console.log(formatReport(report, opts.format as "text" | "json" | "markdown"));
+
+        if (report.summary.critical > 0) {
+          process.exit(2);
+        }
+        if (report.summary.high > 0) {
+          process.exit(1);
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`\n  Error: ${message}\n`);
+        process.exit(1);
+      }
+    },
+  );
+
+// ── monitor command ─────────────────────────────────────────────────
+
+program
+  .command("monitor")
+  .description("Monitor a Solana wallet for C2 memo transactions")
+  .argument("<address>", "Solana wallet address to monitor")
+  .option("-i, --interval <seconds>", "Polling interval in seconds", "30")
+  .option("-l, --limit <count>", "Max transactions per poll", "20")
+  .option("-f, --format <format>", "Output format: text, json", "text")
+  .option("--once", "Check once and exit (no continuous monitoring)")
+  .action(
+    async (
+      address: string,
+      opts: {
+        interval: string;
+        limit: string;
+        format: string;
+        once?: boolean;
+      },
+    ) => {
+      try {
+        if (opts.once) {
+          // One-shot check
+          const results = await checkWallet(
+            address,
+            parseInt(opts.limit, 10),
+          );
+
+          if (opts.format === "json") {
+            console.log(JSON.stringify(results, null, 2));
+          } else {
+            if (results.length === 0) {
+              console.log("\n  No memo transactions found.\n");
+            } else {
+              console.log(`\n  Found ${results.length} memo transaction(s):\n`);
+              for (const tx of results) {
+                console.log(`  Signature: ${tx.signature}`);
+                console.log(`  Memos:     ${tx.memos.join(", ")}`);
+                if (tx.blockTime) {
+                  console.log(
+                    `  Time:      ${new Date(tx.blockTime * 1000).toISOString()}`,
+                  );
+                }
+                console.log("");
+              }
+            }
+          }
+          return;
+        }
+
+        // Continuous monitoring
+        await monitorWallet(
+          {
+            address,
+            interval: parseInt(opts.interval, 10),
+            limit: parseInt(opts.limit, 10),
+            format: opts.format as "text" | "json",
+          },
+          (alert) => {
+            if (opts.format === "json") {
+              console.log(JSON.stringify(alert, null, 2));
+            } else {
+              console.log(formatAlert(alert));
+            }
+          },
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`\n  Error: ${message}\n`);
+        process.exit(1);
+      }
+    },
+  );
+
+program.parse();

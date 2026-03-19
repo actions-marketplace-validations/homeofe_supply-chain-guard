@@ -1,0 +1,54 @@
+{
+  "name": "supply-chain-guard",
+  "version": "1.0.0",
+  "description": "Open-source supply-chain security scanner for npm, PyPI, and VS Code extensions. Detects GlassWorm and similar malware campaigns.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "supply-chain-guard": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "security",
+    "supply-chain",
+    "malware-detection",
+    "npm",
+    "glassworm",
+    "scanner",
+    "cli",
+    "github-action"
+  ],
+  "author": "Elvatis <emre.kohler@elvatis.com>",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/homeofe/supply-chain-guard.git"
+  },
+  "bugs": {
+    "url": "https://github.com/homeofe/supply-chain-guard/issues"
+  },
+  "homepage": "https://github.com/homeofe/supply-chain-guard#readme",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "files": [
+    "dist/**/*",
+    "action.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "commander": "^13.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
