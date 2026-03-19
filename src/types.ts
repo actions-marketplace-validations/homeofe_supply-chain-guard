@@ -29,7 +29,7 @@ export interface ScanReport {
   /** What was scanned (path, URL, package name) */
   target: string;
   /** Type of scan performed */
-  scanType: "directory" | "github" | "npm" | "solana";
+  scanType: "directory" | "github" | "npm" | "pypi" | "solana";
   /** Duration in milliseconds */
   durationMs: number;
   /** All findings */

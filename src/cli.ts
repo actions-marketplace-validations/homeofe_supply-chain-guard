@@ -10,6 +10,7 @@
 import { Command } from "commander";
 import { scan } from "./scanner.js";
 import { scanNpmPackage } from "./npm-scanner.js";
+import { scanPypiPackage } from "./pypi-scanner.js";
 import { monitorWallet, formatAlert, checkWallet } from "./solana-monitor.js";
 import { formatReport } from "./reporter.js";
 import type { ScanOptions, Severity } from "./types.js";
@@ -94,6 +95,45 @@ program
     ) => {
       try {
         const report = await scanNpmPackage(packageName, {
+          target: packageName,
+          format: opts.format as "text" | "json" | "markdown",
+          minSeverity: opts.minSeverity as Severity | undefined,
+        });
+
+        console.log(formatReport(report, opts.format as "text" | "json" | "markdown"));
+
+        if (report.summary.critical > 0) {
+          process.exit(2);
+        }
+        if (report.summary.high > 0) {
+          process.exit(1);
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`\n  Error: ${message}\n`);
+        process.exit(1);
+      }
+    },
+  );
+
+// ── pypi command ────────────────────────────────────────────────────
+
+program
+  .command("pypi")
+  .description("Scan a PyPI package for malware indicators (downloads without installing)")
+  .argument("<package>", "PyPI package name (e.g., requests, flask)")
+  .option("-f, --format <format>", "Output format: text, json, markdown", "text")
+  .option(
+    "-s, --min-severity <severity>",
+    "Minimum severity to report",
+  )
+  .action(
+    async (
+      packageName: string,
+      opts: { format: string; minSeverity?: string },
+    ) => {
+      try {
+        const report = await scanPypiPackage(packageName, {
           target: packageName,
           format: opts.format as "text" | "json" | "markdown",
           minSeverity: opts.minSeverity as Severity | undefined,

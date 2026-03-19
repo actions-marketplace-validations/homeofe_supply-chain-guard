@@ -366,6 +366,169 @@ export const CAMPAIGN_PATTERNS: PatternEntry[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// PyPI-specific patterns (Python supply-chain attacks)
+// ---------------------------------------------------------------------------
+
+/** Patterns for detecting malicious code in Python packages */
+export const PYPI_FILE_PATTERNS: PatternEntry[] = [
+  // System command execution in setup files
+  {
+    name: "setup-os-system",
+    pattern: "os\\.system\\s*\\(",
+    description: "os.system() call detected in package file (potential code execution during install)",
+    severity: "high",
+    rule: "PYPI_OS_SYSTEM",
+  },
+  {
+    name: "setup-subprocess",
+    pattern: "subprocess\\.(?:call|run|Popen|check_output|check_call)\\s*\\(",
+    description: "subprocess execution detected in package file (potential code execution during install)",
+    severity: "high",
+    rule: "PYPI_SUBPROCESS",
+  },
+
+  // Encoded execution
+  {
+    name: "python-exec-encoded",
+    pattern: "exec\\s*\\(\\s*(?:base64\\.b64decode|codecs\\.decode|bytes\\.fromhex)\\s*\\(",
+    description: "exec() with encoded/decoded content detected (obfuscated code execution)",
+    severity: "critical",
+    rule: "PYPI_EXEC_ENCODED",
+  },
+  {
+    name: "python-eval-encoded",
+    pattern: "eval\\s*\\(\\s*(?:base64\\.b64decode|codecs\\.decode|bytes\\.fromhex)\\s*\\(",
+    description: "eval() with encoded/decoded content detected (obfuscated code execution)",
+    severity: "critical",
+    rule: "PYPI_EVAL_ENCODED",
+  },
+  {
+    name: "python-exec-compile",
+    pattern: "exec\\s*\\(\\s*compile\\s*\\(",
+    description: "exec(compile()) detected (dynamic code compilation and execution)",
+    severity: "high",
+    rule: "PYPI_EXEC_COMPILE",
+  },
+
+  // Base64 import smuggling
+  {
+    name: "python-import-base64",
+    pattern: "__import__\\s*\\(\\s*['\"]base64['\"]\\s*\\)",
+    description: "__import__('base64') detected (hidden import often used for payload decoding)",
+    severity: "high",
+    rule: "PYPI_IMPORT_BASE64",
+  },
+  {
+    name: "python-import-codecs",
+    pattern: "__import__\\s*\\(\\s*['\"]codecs['\"]\\s*\\)",
+    description: "__import__('codecs') detected (hidden import for obfuscation)",
+    severity: "medium",
+    rule: "PYPI_IMPORT_CODECS",
+  },
+  {
+    name: "python-import-marshal",
+    pattern: "__import__\\s*\\(\\s*['\"]marshal['\"]\\s*\\)",
+    description: "__import__('marshal') detected (bytecode-level obfuscation)",
+    severity: "high",
+    rule: "PYPI_IMPORT_MARSHAL",
+  },
+
+  // Network activity in setup files
+  {
+    name: "python-urllib-setup",
+    pattern: "urllib\\.request\\.urlopen\\s*\\(",
+    description: "urllib.request.urlopen() detected (network access, potential payload download)",
+    severity: "high",
+    rule: "PYPI_URLLIB_FETCH",
+  },
+  {
+    name: "python-requests-setup",
+    pattern: "requests\\.(?:get|post)\\s*\\(",
+    description: "requests.get/post() detected (network access during install)",
+    severity: "medium",
+    rule: "PYPI_REQUESTS_FETCH",
+  },
+
+  // Suspicious pip install in setup.py
+  {
+    name: "python-pip-install-url",
+    pattern: "pip\\s+install\\s+(?:--index-url|--extra-index-url|-i)\\s+https?://(?!pypi\\.org)",
+    description: "pip install from non-PyPI URL detected (potential malicious package index)",
+    severity: "critical",
+    rule: "PYPI_SUSPICIOUS_INDEX",
+  },
+  {
+    name: "python-pip-install-git",
+    pattern: "pip\\s+install\\s+git\\+https?://",
+    description: "pip install from git URL in setup file (unverified dependency source)",
+    severity: "medium",
+    rule: "PYPI_GIT_DEPENDENCY",
+  },
+
+  // Data exfiltration patterns in Python
+  {
+    name: "python-env-exfil",
+    pattern: "os\\.environ\\b[^;\\n]*(?:urllib|requests|http\\.client|socket)",
+    description: "Environment variable access combined with network activity (data exfiltration pattern)",
+    severity: "high",
+    rule: "PYPI_ENV_EXFILTRATION",
+  },
+  {
+    name: "python-hostname-exfil",
+    pattern: "socket\\.gethostname\\s*\\(\\)[^;\\n]*(?:urllib|requests|http)",
+    description: "Hostname collection combined with network activity (reconnaissance/exfiltration)",
+    severity: "high",
+    rule: "PYPI_HOSTNAME_EXFIL",
+  },
+];
+
+/** Setup file names to check for install hooks */
+export const PYPI_SETUP_FILES = new Set([
+  "setup.py",
+  "setup.cfg",
+  "pyproject.toml",
+]);
+
+/** Suspicious install hook patterns in setup.py */
+export const PYPI_INSTALL_HOOK_PATTERNS: PatternEntry[] = [
+  {
+    name: "setup-cmdclass-install",
+    pattern: "cmdclass\\s*=\\s*\\{[^}]*['\"]install['\"]",
+    description: "Custom install command class detected (code runs during pip install)",
+    severity: "medium",
+    rule: "PYPI_CUSTOM_INSTALL",
+  },
+  {
+    name: "setup-cmdclass-develop",
+    pattern: "cmdclass\\s*=\\s*\\{[^}]*['\"]develop['\"]",
+    description: "Custom develop command class detected (code runs during pip install -e)",
+    severity: "medium",
+    rule: "PYPI_CUSTOM_DEVELOP",
+  },
+  {
+    name: "setup-cmdclass-egg-info",
+    pattern: "cmdclass\\s*=\\s*\\{[^}]*['\"]egg_info['\"]",
+    description: "Custom egg_info command class detected (code runs during package metadata generation)",
+    severity: "medium",
+    rule: "PYPI_CUSTOM_EGG_INFO",
+  },
+  {
+    name: "setup-cmdclass-sdist",
+    pattern: "cmdclass\\s*=\\s*\\{[^}]*['\"]sdist['\"]",
+    description: "Custom sdist command class detected (code runs during source distribution build)",
+    severity: "low",
+    rule: "PYPI_CUSTOM_SDIST",
+  },
+];
+
+/** Python file extensions to scan */
+export const PYTHON_EXTENSIONS = new Set([
+  ".py",
+  ".pyw",
+  ".pyi",
+]);
+
+// ---------------------------------------------------------------------------
 // File extensions to scan
 // ---------------------------------------------------------------------------
 
