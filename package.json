@@ -1,6 +1,6 @@
 {
   "name": "supply-chain-guard",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Open-source supply-chain security scanner for npm, PyPI, and VS Code extensions. Detects GlassWorm and similar malware campaigns.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
