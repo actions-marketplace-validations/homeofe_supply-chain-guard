@@ -1,9 +1,10 @@
 # 🛡️ supply-chain-guard
 
-Open-source supply-chain security scanner for npm, PyPI, and VS Code extensions. Detects [GlassWorm](https://www.reversinglabs.com/blog/glassworm-backdoor-campaign-npm-vscode) and similar malware campaigns.
+Open-source supply-chain security scanner for npm, PyPI, VS Code extensions, GitHub Actions workflows and Solana C2. Detects [GlassWorm](https://www.reversinglabs.com/blog/glassworm-backdoor-campaign-npm-vscode) and similar malware campaigns.
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20-green)](https://nodejs.org)
+[![npm](https://img.shields.io/badge/npm-v3.0.0-blue)](https://www.npmjs.com/package/supply-chain-guard)
 
 ## Background
 
@@ -23,6 +24,9 @@ supply-chain-guard scans code repositories and npm packages for known indicators
 - 🟡 **Solana blockchain C2** (mainnet-beta, Helius RPC references used as command-and-control channels)
 - 🟡 **Git history manipulation** (committer dates far newer than author dates)
 - 🔵 **Typosquatting package names** (known malicious npm package patterns)
+- 🟠 **PyPI malicious install hooks** (setup.py subprocess, base64 exec, download-and-run in cmdclass)
+- 🟠 **GitHub Actions CI/CD attacks** (unpinned actions, secrets exfiltration, encoded payloads in run blocks)
+- 🟡 **Solana C2 wallet watchlist** (persistent monitoring of known command-and-control wallets with webhook alerts)
 
 ## Installation
 
@@ -288,6 +292,24 @@ supply-chain-guard was built to detect these specific attack patterns and make t
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. The most impactful contribution is adding new detection patterns for emerging threats.
+
+
+## Changelog
+
+### v3.0.0 (2026-03-26)
+- **New:** PyPI scanner detects malicious `setup.py` install hooks (subprocess, base64 exec, cmdclass downloads)
+- **New:** GitHub Actions workflow scanner detects CI/CD pipeline attacks (unpinned actions, secrets exfiltration, encoded payloads)
+- **New:** SARIF 2.1.0 output format for GitHub Code Scanning integration (`--format sarif`)
+- **New:** Solana C2 wallet watchlist with persistent monitoring and webhook alerts (`watchlist` commands)
+- **New:** Blog post reference and improved quickstart guide
+- **Docs:** Example GitHub Actions workflow for SARIF upload at `docs/github-actions-sarif.yml`
+
+### v2.0.0
+- Multi-platform scanner (npm, PyPI, VS Code)
+- Dependency confusion detection
+- Lockfile integrity checks
+- Solana C2 monitoring
+
 
 ## License
 
