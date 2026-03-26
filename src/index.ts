@@ -23,6 +23,7 @@ export {
 } from "./solana-monitor.js";
 export { formatReport } from "./reporter.js";
 export { checkLockfile } from "./lockfile-checker.js";
+export { scanGitHubActionsWorkflows } from "./github-actions-scanner.js";
 export type {
   Finding,
   ScanReport,
