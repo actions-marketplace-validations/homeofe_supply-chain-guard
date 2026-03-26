@@ -71,7 +71,7 @@ export interface ConfusionScanOptions {
   /** Path to the project directory (containing package.json) */
   target: string;
   /** Output format */
-  format: "text" | "json" | "markdown" | "sarif";
+  format: "text" | "json" | "markdown" | "sarif" | "sbom";
   /** Minimum severity to report */
   minSeverity?: Severity;
   /** Include devDependencies in the check */

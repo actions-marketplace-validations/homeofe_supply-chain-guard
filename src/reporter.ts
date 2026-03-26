@@ -3,6 +3,7 @@
  * Supports text, JSON, markdown, and SARIF 2.1.0 output.
  */
 
+import { randomUUID } from "node:crypto";
 import type { Finding, ScanReport, Severity } from "./types.js";
 
 const SEVERITY_COLORS: Record<Severity, string> = {
@@ -29,7 +30,7 @@ const SEVERITY_ICONS: Record<Severity, string> = {
  */
 export function formatReport(
   report: ScanReport,
-  format: "text" | "json" | "markdown" | "sarif",
+  format: "text" | "json" | "markdown" | "sarif" | "sbom",
 ): string {
   switch (format) {
     case "json":
@@ -38,6 +39,8 @@ export function formatReport(
       return formatMarkdown(report);
     case "sarif":
       return formatSarif(report);
+    case "sbom":
+      return formatSbom(report);
     case "text":
     default:
       return formatText(report);
@@ -326,7 +329,7 @@ function formatSarif(report: ScanReport): string {
         tool: {
           driver: {
             name: "supply-chain-guard",
-            version: "2.0.0",
+            version: "3.1.0",
             informationUri: "https://github.com/homeofe/supply-chain-guard",
             rules,
           },
@@ -351,4 +354,56 @@ function severityRank(severity: Severity): number {
     info: 0,
   };
   return ranks[severity];
+}
+
+/**
+ * Format as CycloneDX 1.5 JSON SBOM.
+ */
+function formatSbom(report: ScanReport): string {
+  const sbom = {
+    bomFormat: "CycloneDX",
+    specVersion: "1.5",
+    serialNumber: `urn:uuid:${randomUUID()}`,
+    version: 1,
+    metadata: {
+      timestamp: report.timestamp,
+      tools: {
+        components: [
+          {
+            type: "application",
+            name: "supply-chain-guard",
+            version: "3.1.0",
+          },
+        ],
+      },
+      component: {
+        type: "application" as const,
+        name: report.target,
+        "bom-ref": "target",
+      },
+    },
+    components: [
+      {
+        type: "application",
+        "bom-ref": "target",
+        name: report.target,
+      },
+    ],
+    vulnerabilities: report.findings.map((finding, idx) => ({
+      "bom-ref": `vuln-${idx}`,
+      id: finding.rule,
+      source: { name: "supply-chain-guard" },
+      ratings: [
+        {
+          severity: finding.severity,
+          method: "other",
+        },
+      ],
+      description: finding.description,
+      recommendation: finding.recommendation,
+      affects: [{ ref: "target" }],
+    })),
+  };
+
+  return JSON.stringify(sbom, null, 2);
 }

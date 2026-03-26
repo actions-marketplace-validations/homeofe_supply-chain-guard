@@ -10,9 +10,9 @@
 
 | Status | Count |
 |--------|-------|
-| Ready | 7 |
+| Ready | 2 |
 | Blocked | 0 |
-| Done | 10 |
+| Done | 15 |
 
 ---
 
@@ -200,6 +200,12 @@
 
 | ID | Task | Completed |
 |----|------|-----------|
+| T-001 | Add solana-monitor unit tests (23 tests) | 2026-03-26 |
+| T-002 | Add reporter unit tests (39 tests – JSON, SARIF, markdown, text, SBOM) | 2026-03-26 |
+| T-003 | Add CLI integration tests (22 tests) | 2026-03-26 |
+| T-004 | SBOM export (CycloneDX 1.5 JSON) | 2026-03-26 |
+| T-005 | --fail-on severity threshold flag | 2026-03-26 |
+| - | v3.1.0 released (269 tests, all passing) | 2026-03-26 |
 | - | v3.0.0: All features merged to main | 2026-03-26 |
 | - | AAHP handoff docs created (all 8 files) | 2026-03-26 |
 | - | Stale feature branches deleted | 2026-03-26 |

@@ -9,7 +9,7 @@
 
 | Name | Path | Build | Tests | Status | Notes |
 |------|------|-------|-------|--------|-------|
-| CLI entry | `src/cli.ts` | ✅ | manual | ✅ | commander-based, all subcommands |
+| CLI entry | `src/cli.ts` | ✅ | ✅ 22 | ✅ | commander-based, all subcommands |
 | Central scanner | `src/scanner.ts` | ✅ | ✅ 18 | ✅ | delegates to all sub-scanners |
 | npm scanner | `src/npm-scanner.ts` | ✅ | ✅ 10 | ✅ | install scripts, obfuscation, typosquatting |
 | PyPI scanner | `src/pypi-scanner.ts` | ✅ | ✅ 44 | ✅ | incl. install hook detection |
@@ -20,8 +20,10 @@
 | Binary detection | `src/patterns.ts` + scanner | ✅ | ✅ 11 | ✅ | 30-entry whitelist |
 | Beacon/miner detection | `src/patterns.ts` | ✅ | ✅ 21 | ✅ | network beacons, crypto miners |
 | Campaign signatures | `src/patterns.ts` | ✅ | ✅ 21 | ✅ | 13 campaigns (XZ, SolarWinds...) |
-| Solana C2 monitor | `src/solana-monitor.ts` | ✅ | ❌ none | ⚠️ | no unit tests yet |
-| Reporter | `src/reporter.ts` | ✅ | ❌ none | ⚠️ | SARIF/JSON/MD output untested |
+| Solana C2 monitor | `src/solana-monitor.ts` | ✅ | ✅ 23 | ✅ | wallet monitoring, watchlist, webhook |
+| Reporter | `src/reporter.ts` | ✅ | ✅ 39 | ✅ | text/JSON/markdown/SARIF/SBOM tested |
+| SBOM export | `src/reporter.ts` | ✅ | ✅ | ✅ | CycloneDX 1.5 JSON format |
+| --fail-on flag | `src/cli.ts` | ✅ | ✅ | ✅ | severity threshold for CI pipelines |
 | GitHub Action | `action.yml` + `src/action.ts` | ✅ | manual | ✅ | branding: shield/red |
 | CI workflow | `.github/workflows/ci.yml` | ✅ | n/a | ✅ | build+test on push/PR, npm publish on v* |
 
@@ -43,11 +45,11 @@
 | dependency-confusion.test.ts | 12 | ✅ All pass | 2026-03-26 |
 | binary-detection.test.ts | 11 | ✅ All pass | 2026-03-26 |
 | npm-scanner.test.ts | 10 | ✅ All pass | 2026-03-26 |
-| solana-monitor.test.ts | 0 | ❌ Missing | - |
-| reporter.test.ts | 0 | ❌ Missing | - |
-| cli.test.ts | 0 | ❌ Missing | - |
+| solana-monitor.test.ts | 23 | ✅ All pass | 2026-03-26 |
+| reporter.test.ts | 39 | ✅ All pass | 2026-03-26 |
+| cli.test.ts | 22 | ✅ All pass | 2026-03-26 |
 
-**Total: 185 tests, 185 passing**
+**Total: 269 tests, 269 passing**
 
 ---
 
@@ -58,7 +60,7 @@
 | GitHub repo | ✅ | homeofe/supply-chain-guard (Apache-2.0) |
 | GitHub Actions CI | ✅ | build + test on push/PR |
 | npm auto-publish | ✅ | triggers on `v*` tags via CI |
-| npm package | ✅ | supply-chain-guard@3.0.0 (unscoped, public) |
+| npm package | ✅ | supply-chain-guard@3.1.0 (unscoped, public) |
 | GitHub Marketplace | ✅ | supply-chain-guard GitHub Action |
 | ClawHub | n/a | CLI tool, not an OpenClaw skill |
 
@@ -68,9 +70,9 @@
 
 | Field | Value |
 |-------|-------|
-| Current version | 3.0.0 |
+| Current version | 3.1.0 |
 | Current phase | feature development |
-| Last completed | v3.0.0 release (2026-03-26) |
+| Last completed | v3.1.0 release (2026-03-26) |
 | Blocking issues | None |
 
 ---
@@ -79,11 +81,6 @@
 
 | ID | Task | Priority | Status |
 |----|------|----------|--------|
-| T-001 | Add solana-monitor unit tests | high | ready |
-| T-002 | Add reporter unit tests (SARIF, JSON, markdown) | high | ready |
-| T-003 | Add CLI integration tests | medium | ready |
-| T-004 | SBOM export (CycloneDX/SPDX) | medium | ready |
-| T-005 | --fail-on severity threshold flag for CI | medium | ready |
 | T-006 | Cargo/Go module scanner | low | ready |
 | T-007 | Rate-limit handling in Solana monitor | low | ready |
 
@@ -96,6 +93,11 @@
 | - | v3.0.0: GitHub Actions scanner, SARIF output, Solana watchlist, PyPI install hooks | 2026-03-26 |
 | - | CI workflow (auto-publish on tag) | 2026-03-26 |
 | - | AAHP handoff docs completed | 2026-03-26 |
+| T-001 | Add solana-monitor unit tests (23 tests) | 2026-03-26 |
+| T-002 | Add reporter unit tests (39 tests – JSON, SARIF, markdown, text, SBOM) | 2026-03-26 |
+| T-003 | Add CLI integration tests (22 tests) | 2026-03-26 |
+| T-004 | SBOM export (CycloneDX 1.5 JSON) | 2026-03-26 |
+| T-005 | --fail-on severity threshold flag | 2026-03-26 |
 
 ---
 

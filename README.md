@@ -4,7 +4,7 @@ Open-source supply-chain security scanner for npm, PyPI, VS Code extensions, Git
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20-green)](https://nodejs.org)
-[![npm](https://img.shields.io/badge/npm-v3.0.0-blue)](https://www.npmjs.com/package/supply-chain-guard)
+[![npm](https://img.shields.io/badge/npm-v3.1.0-blue)](https://www.npmjs.com/package/supply-chain-guard)
 
 ## Background
 
@@ -124,7 +124,30 @@ supply-chain-guard scan ./project --format json
 
 # Markdown (for PR comments)
 supply-chain-guard scan ./project --format markdown
+
+# SARIF 2.1.0 (for GitHub Code Scanning)
+supply-chain-guard scan ./project --format sarif
+
+# CycloneDX 1.5 SBOM (for compliance: NIS2, SSDF, SBOM mandates)
+supply-chain-guard scan ./project --format sbom
 ```
+
+### CI Exit Code Control
+
+By default, the scanner exits 2 on critical findings and 1 on high findings. Use `--fail-on` to set a custom threshold:
+
+```bash
+# Fail only on critical (ignore high/medium/low)
+supply-chain-guard scan ./project --fail-on critical
+
+# Fail on high or above (critical + high)
+supply-chain-guard scan ./project --fail-on high
+
+# Fail on any finding
+supply-chain-guard scan ./project --fail-on info
+```
+
+This is useful for tiered CI pipelines: block deploys on critical, warn on medium.
 
 ### Filtering
 
@@ -295,6 +318,12 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. The most impactful contri
 
 
 ## Changelog
+
+### v3.1.0 (2026-03-26)
+- **New:** SBOM export in CycloneDX 1.5 JSON format (`--format sbom`) for compliance (NIS2, SSDF)
+- **New:** `--fail-on <severity>` flag for tiered CI pipelines (fail only at specified severity threshold)
+- **Tests:** Full unit test coverage for solana-monitor (23 tests), reporter (39 tests), CLI integration (22 tests)
+- **Total:** 269 tests, all passing
 
 ### v3.0.0 (2026-03-26)
 - **New:** PyPI scanner detects malicious `setup.py` install hooks (subprocess, base64 exec, cmdclass downloads)

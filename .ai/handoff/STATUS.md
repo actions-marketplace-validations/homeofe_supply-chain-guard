@@ -1,9 +1,9 @@
 # supply-chain-guard - Project Status
 
-## Current Version: 3.0.0
+## Current Version: 3.1.0
 
 ### Published
-- npm: supply-chain-guard@3.0.0 (unscoped, public)
+- npm: supply-chain-guard@3.1.0 (unscoped, public)
 - GitHub: homeofe/supply-chain-guard (Apache-2.0)
 - GitHub Marketplace: supply-chain-guard (GitHub Action)
 - ClawHub: not published (CLI tool, not an OpenClaw skill)

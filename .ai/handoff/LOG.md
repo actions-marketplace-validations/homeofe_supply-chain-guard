@@ -6,6 +6,32 @@
 
 ---
 
+## [2026-03-26] Claude Sonnet 4.6: v3.1.0 - test coverage, SBOM export, --fail-on flag
+
+**Agent:** Claude Sonnet 4.6 (claude-sonnet-4-6)
+**Phase:** implementation
+**Branch:** main
+**Tasks:** T-001, T-002, T-003, T-004, T-005
+
+### What was done
+
+- **T-001 (solana-monitor tests):** File already existed with 23 tests covering `checkWallet`, `monitorWallet`, `formatAlert`, and all watchlist operations (load/save/add/remove/list). All passing.
+- **T-002 (reporter tests):** Created `src/__tests__/reporter.test.ts` with 39 tests covering all 5 output formats: JSON (5 tests), SARIF 2.1.0 (9 tests), Markdown (8 tests), Text (7 tests), and CycloneDX 1.5 SBOM (10 tests). Tests verify structure, severity mappings, empty report handling, and field preservation.
+- **T-003 (CLI integration tests):** Created `src/__tests__/cli.test.ts` with 22 tests using `spawnSync`. Created fixture directories `fixtures/clean-npm-pkg/` and `fixtures/malicious-npm-pkg/`. Tests cover: --version, --help, scan clean (exit 0), scan malicious (exit 2), JSON/SARIF/SBOM output, --fail-on threshold flag, watchlist list, unknown command.
+- **T-004 (SBOM export):** Already implemented in `src/reporter.ts` as `formatSbom()` (CycloneDX 1.5 JSON). Fixed TypeScript build errors: `VscodeScanOptions.format` and `ConfusionScanOptions.format` were missing `"sbom"` variant -- added to both.
+- **T-005 (--fail-on flag):** Already implemented in `src/cli.ts`. Tests added in cli.test.ts verify correct exit codes at each threshold.
+- **Version bump:** 3.0.0 → 3.1.0 across `package.json`, `README.md` (badge + changelog), `src/cli.ts` (.version()), `src/reporter.ts` (SARIF driver version + SBOM tool version), `STATUS.md`, `MANIFEST.json`.
+- **Total tests:** 269 (was 208), all passing. Build: clean.
+
+### Decisions made
+
+- Kept `src/__tests__/solana-monitor.test.ts` as-is (already comprehensive, 23 tests).
+- CLI tests use `node dist/cli.js` via `spawnSync` (no Jest-style CLI runner needed).
+- SBOM tests verify CycloneDX 1.5 structure: `bomFormat`, `specVersion`, `serialNumber` (urn:uuid), `metadata.tools`, `components`, `vulnerabilities` with severity ratings.
+- Fixed two TypeScript type errors in `vscode-scanner.ts` and `dependency-confusion.ts` where `format` union type was missing `"sbom"`.
+
+---
+
 ## [2026-03-26] Akido: AAHP handoff docs + post-v3.0.0 cleanup
 
 **Agent:** Akido (OpenClaw / claude-sonnet-4-6)

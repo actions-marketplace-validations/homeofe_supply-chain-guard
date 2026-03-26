@@ -32,7 +32,7 @@ program
   .description(
     "Open-source supply-chain security scanner. Detects GlassWorm and similar malware campaigns in npm packages, PyPI packages, code repos, VS Code extensions, and project dependencies.",
   )
-  .version("1.0.0");
+  .version("3.1.0");
 
 // ── scan command ────────────────────────────────────────────────────
 
@@ -40,7 +40,7 @@ program
   .command("scan")
   .description("Scan a local directory or GitHub repo for malware indicators")
   .argument("<target>", "Local directory path or GitHub repo URL")
-  .option("-f, --format <format>", "Output format: text, json, markdown, sarif", "text")
+  .option("-f, --format <format>", "Output format: text, json, markdown, sarif, sbom", "text")
   .option(
     "-s, --min-severity <severity>",
     "Minimum severity to report: critical, high, medium, low, info",
@@ -50,6 +50,10 @@ program
     "Comma-separated list of rule IDs to exclude",
   )
   .option("-d, --depth <depth>", "Maximum directory depth", "20")
+  .option(
+    "--fail-on <severity>",
+    "Exit non-zero only if findings at or above this severity: critical, high, medium, low, info",
+  )
   .action(
     async (
       target: string,
@@ -58,12 +62,13 @@ program
         minSeverity?: string;
         exclude?: string;
         depth: string;
+        failOn?: string;
       },
     ) => {
       try {
         const options: ScanOptions = {
           target,
-          format: opts.format as "text" | "json" | "markdown" | "sarif",
+          format: opts.format as "text" | "json" | "markdown" | "sarif" | "sbom" | "sbom",
           minSeverity: opts.minSeverity as Severity | undefined,
           excludeRules: opts.exclude?.split(",").map((r) => r.trim()),
           maxDepth: parseInt(opts.depth, 10),
@@ -72,12 +77,25 @@ program
         const report = await scan(options);
         console.log(formatReport(report, options.format));
 
-        // Exit with non-zero if critical findings
-        if (report.summary.critical > 0) {
-          process.exit(2);
-        }
-        if (report.summary.high > 0) {
-          process.exit(1);
+        // Exit code logic
+        if (opts.failOn) {
+          const severityOrder: Record<string, number> = {
+            critical: 4, high: 3, medium: 2, low: 1, info: 0,
+          };
+          const threshold = severityOrder[opts.failOn] ?? 0;
+          const hasFindings = report.findings.some(
+            (f) => (severityOrder[f.severity] ?? 0) >= threshold,
+          );
+          if (hasFindings) {
+            process.exit(1);
+          }
+        } else {
+          if (report.summary.critical > 0) {
+            process.exit(2);
+          }
+          if (report.summary.high > 0) {
+            process.exit(1);
+          }
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -106,11 +124,11 @@ program
       try {
         const report = await scanNpmPackage(packageName, {
           target: packageName,
-          format: opts.format as "text" | "json" | "markdown" | "sarif",
+          format: opts.format as "text" | "json" | "markdown" | "sarif" | "sbom",
           minSeverity: opts.minSeverity as Severity | undefined,
         });
 
-        console.log(formatReport(report, opts.format as "text" | "json" | "markdown" | "sarif"));
+        console.log(formatReport(report, opts.format as "text" | "json" | "markdown" | "sarif" | "sbom"));
 
         if (report.summary.critical > 0) {
           process.exit(2);
@@ -145,11 +163,11 @@ program
       try {
         const report = await scanPypiPackage(packageName, {
           target: packageName,
-          format: opts.format as "text" | "json" | "markdown" | "sarif",
+          format: opts.format as "text" | "json" | "markdown" | "sarif" | "sbom",
           minSeverity: opts.minSeverity as Severity | undefined,
         });
 
-        console.log(formatReport(report, opts.format as "text" | "json" | "markdown" | "sarif"));
+        console.log(formatReport(report, opts.format as "text" | "json" | "markdown" | "sarif" | "sbom"));
 
         if (report.summary.critical > 0) {
           process.exit(2);
@@ -187,11 +205,11 @@ program
       try {
         const report = await scanVscodeExtension({
           target,
-          format: opts.format as "text" | "json" | "markdown" | "sarif",
+          format: opts.format as "text" | "json" | "markdown" | "sarif" | "sbom",
           minSeverity: opts.minSeverity as Severity | undefined,
         });
 
-        console.log(formatReport(report, opts.format as "text" | "json" | "markdown" | "sarif"));
+        console.log(formatReport(report, opts.format as "text" | "json" | "markdown" | "sarif" | "sbom"));
 
         if (report.summary.critical > 0) {
           process.exit(2);
@@ -227,12 +245,12 @@ program
       try {
         const report = await scanDependencyConfusion({
           target,
-          format: opts.format as "text" | "json" | "markdown" | "sarif",
+          format: opts.format as "text" | "json" | "markdown" | "sarif" | "sbom",
           minSeverity: opts.minSeverity as Severity | undefined,
           includeDevDeps: opts.dev,
         });
 
-        console.log(formatReport(report, opts.format as "text" | "json" | "markdown" | "sarif"));
+        console.log(formatReport(report, opts.format as "text" | "json" | "markdown" | "sarif" | "sbom"));
 
         if (report.summary.critical > 0) {
           process.exit(2);

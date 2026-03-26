@@ -126,7 +126,7 @@ export interface VscodeScanOptions {
   /** .vsix file path or extension ID (publisher.name) */
   target: string;
   /** Output format */
-  format: "text" | "json" | "markdown" | "sarif";
+  format: "text" | "json" | "markdown" | "sarif" | "sbom";
   /** Minimum severity to report */
   minSeverity?: Severity;
 }

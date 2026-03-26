@@ -1,0 +1,12 @@
+{
+  "name": "clean-test-package",
+  "version": "1.0.0",
+  "description": "A clean test package with no malware indicators",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo ok"
+  },
+  "dependencies": {
+    "lodash": "^4.17.21"
+  }
+}

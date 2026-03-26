@@ -1,19 +1,28 @@
 {
   "aahp_version": "3.0",
   "project": "supply-chain-guard",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "repo": "https://github.com/homeofe/supply-chain-guard",
   "description": "Open-source supply-chain security scanner for npm, PyPI, VS Code extensions, GitHub Actions workflows and Solana C2. Detects GlassWorm and similar malware campaigns.",
-  "tech_stack": ["Node.js", "TypeScript", "CLI", "GitHub Action"],
-  "entry_points": ["src/index.ts", "src/cli.ts", "src/action.ts"],
+  "tech_stack": [
+    "Node.js",
+    "TypeScript",
+    "CLI",
+    "GitHub Action"
+  ],
+  "entry_points": [
+    "src/index.ts",
+    "src/cli.ts",
+    "src/action.ts"
+  ],
   "test_command": "npm test",
   "build_command": "npm run build",
   "last_session": {
-    "agent": "akido",
-    "session_id": "webchat-2026-03-26",
-    "timestamp": "2026-03-26T09:30:00.000Z",
-    "commit": "e6d9da2",
-    "phase": "maintenance",
+    "agent": "claude-sonnet-4-6",
+    "session_id": "openclaw-2026-03-26-v3.1.0",
+    "timestamp": "2026-03-26T10:55:00.000Z",
+    "commit": "pending",
+    "phase": "implementation",
     "duration_minutes": 30
   },
   "handoff_files": [
@@ -27,40 +36,40 @@
     "WORKFLOW.md",
     "LOG.md"
   ],
-  "quick_context": "v3.0.0 released. 185 tests passing. Missing tests: solana-monitor, reporter, cli. Next: T-001 solana tests.",
+  "quick_context": "v3.1.0 released. 269 tests passing. T-001 to T-005 completed.",
   "next_task_id": 8,
   "tasks": {
     "T-001": {
       "title": "Add solana-monitor unit tests",
-      "status": "ready",
+      "status": "done",
       "priority": "high",
       "depends_on": [],
       "created": "2026-03-26T09:30:00Z"
     },
     "T-002": {
       "title": "Add reporter unit tests (SARIF, JSON, markdown)",
-      "status": "ready",
+      "status": "done",
       "priority": "high",
       "depends_on": [],
       "created": "2026-03-26T09:30:00Z"
     },
     "T-003": {
       "title": "Add CLI integration tests",
-      "status": "ready",
+      "status": "done",
       "priority": "medium",
       "depends_on": [],
       "created": "2026-03-26T09:30:00Z"
     },
     "T-004": {
       "title": "SBOM export (CycloneDX/SPDX)",
-      "status": "ready",
+      "status": "done",
       "priority": "medium",
       "depends_on": [],
       "created": "2026-03-26T09:30:00Z"
     },
     "T-005": {
       "title": "--fail-on severity threshold flag for CI",
-      "status": "ready",
+      "status": "done",
       "priority": "medium",
       "depends_on": [],
       "created": "2026-03-26T09:30:00Z"
@@ -76,7 +85,9 @@
       "title": "Rate-limit handling in Solana monitor",
       "status": "ready",
       "priority": "low",
-      "depends_on": ["T-001"],
+      "depends_on": [
+        "T-001"
+      ],
       "created": "2026-03-26T09:30:00Z"
     }
   }
