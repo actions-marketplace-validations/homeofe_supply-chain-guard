@@ -25,6 +25,12 @@ export interface Finding {
   category?: "malware" | "supply-chain" | "config" | "trust" | "info";
   /** Correlation cluster ID (v4.2) */
   correlationId?: string;
+  /** Why this was flagged (v4.4) */
+  rationale?: string;
+  /** Evidence snippet (v4.4) */
+  evidence?: string;
+  /** Whether suppressed by policy/baseline (v4.4) */
+  suppressed?: boolean;
 }
 
 export interface ScanReport {
@@ -52,6 +58,33 @@ export interface ScanReport {
   incidents?: IncidentCluster[];
   /** Trust breakdown for npm/pypi packages (v4.2) */
   trustBreakdown?: TrustBreakdown;
+  /** Number of findings suppressed by policy/baseline (v4.4) */
+  suppressedCount?: number;
+  /** Whether scan completed fully (v4.4) */
+  partialScan?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// v4.4 Policy configuration
+// ---------------------------------------------------------------------------
+
+export interface PolicyConfig {
+  rules?: {
+    disable?: string[];
+    severityOverrides?: Record<string, Severity>;
+  };
+  allowlist?: {
+    packages?: string[];
+    domains?: string[];
+    githubOrgs?: string[];
+  };
+  suppress?: Array<{
+    rule: string;
+    reason: string;
+  }>;
+  baseline?: {
+    file?: string;
+  };
 }
 
 export interface ScanSummary {
@@ -75,6 +108,10 @@ export interface ScanOptions {
   excludeRules?: string[];
   /** Maximum directory depth */
   maxDepth?: number;
+  /** Baseline file path (v4.4) */
+  baselineFile?: string;
+  /** Policy config file path (v4.4) */
+  policyFile?: string;
 }
 
 export interface NpmPackageInfo {

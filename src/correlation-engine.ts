@@ -155,6 +155,32 @@ const CORRELATION_RULES: CorrelationRule[] = [
     confidenceBoost: 0.30,
     narrative: "Known-bad package version detected alongside C2 infrastructure. This dependency has been confirmed compromised.",
   },
+
+  // --- v4.4: Secret exfiltration chains ---
+  {
+    rules: ["SECRETS_AWS_KEY", "ENV_EXFILTRATION", "INSTALL_HOOK_NETWORK"],
+    minMatch: 2,
+    incident: "Secret Exfiltration Chain",
+    severity: "critical",
+    confidenceBoost: 0.25,
+    narrative: "Credentials detected in code combined with network exfiltration capability. Active secret theft in progress.",
+  },
+  {
+    rules: ["INSTALL_HOOK_ENV_HARVEST", "INSTALL_HOOK_NETWORK", "INSTALL_HOOK_OBFUSCATED"],
+    minMatch: 2,
+    incident: "Install Hook Secret Exfiltration",
+    severity: "critical",
+    confidenceBoost: 0.25,
+    narrative: "Install script harvests secrets and sends them over the network with obfuscation. Classic supply-chain credential theft.",
+  },
+  {
+    rules: ["GHA_SECRET_CURL", "GHA_BASE64_EXEC", "GHA_UNPINNED_ACTION"],
+    minMatch: 2,
+    incident: "CI Secret Exfiltration Chain",
+    severity: "critical",
+    confidenceBoost: 0.25,
+    narrative: "GitHub Actions workflow exfiltrates secrets via network with encoded payloads. CI/CD credential theft.",
+  },
 ];
 
 // ---------------------------------------------------------------------------

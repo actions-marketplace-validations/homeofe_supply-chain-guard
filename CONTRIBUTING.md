@@ -92,6 +92,8 @@ src/
   lockfile-checker.ts     # Lockfile integrity
   config-scanner.ts       # Package manager configs
   git-scanner.ts          # Git hooks/submodules
+  policy-engine.ts        # Policy config, baseline, suppressions
+  trust-signals.ts        # Positive trust indicators
   reporter.ts             # Output formatting
   cli.ts                  # CLI entry point
   types.ts                # TypeScript interfaces

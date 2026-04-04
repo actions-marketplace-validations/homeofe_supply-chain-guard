@@ -38,6 +38,8 @@ export { analyzePublishingAnomalies } from "./publishing-anomaly-detector.js";
 export { scanReleaseArtifacts } from "./release-scanner.js";
 export { correlateFindings } from "./correlation-engine.js";
 export { calculateTrustBreakdown } from "./trust-breakdown.js";
+export { loadPolicyConfig, applyPolicy, applyBaseline, saveBaseline } from "./policy-engine.js";
+export { detectTrustSignals } from "./trust-signals.js";
 export type {
   Finding,
   ScanReport,

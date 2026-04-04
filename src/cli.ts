@@ -33,7 +33,7 @@ program
   .description(
     "Open-source supply-chain security scanner. Detects GlassWorm and similar malware campaigns in npm packages, PyPI packages, code repos, VS Code extensions, and project dependencies.",
   )
-  .version("4.3.0");
+  .version("4.4.0");
 
 // ── scan command ────────────────────────────────────────────────────
 
@@ -55,6 +55,8 @@ program
     "--fail-on <severity>",
     "Exit non-zero only if findings at or above this severity: critical, high, medium, low, info",
   )
+  .option("--baseline <file>", "Baseline file to diff against (only show new findings)")
+  .option("--save-baseline <file>", "Save current findings as baseline for future diffs")
   .action(
     async (
       target: string,
@@ -64,18 +66,29 @@ program
         exclude?: string;
         depth: string;
         failOn?: string;
+        baseline?: string;
+        saveBaseline?: string;
       },
     ) => {
       try {
         const options: ScanOptions = {
           target,
-          format: opts.format as "text" | "json" | "markdown" | "sarif" | "sbom" | "sbom",
+          format: opts.format as ScanOptions["format"],
           minSeverity: opts.minSeverity as Severity | undefined,
           excludeRules: opts.exclude?.split(",").map((r) => r.trim()),
           maxDepth: parseInt(opts.depth, 10),
+          baselineFile: opts.baseline,
         };
 
         const report = await scan(options);
+
+        // Save baseline if requested
+        if (opts.saveBaseline) {
+          const { saveBaseline } = await import("./policy-engine.js");
+          saveBaseline(report.findings, opts.saveBaseline);
+          console.error(`Baseline saved to ${opts.saveBaseline} (${report.findings.length} findings)`);
+        }
+
         console.log(formatReport(report, options.format));
 
         // Exit code logic

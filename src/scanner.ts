@@ -47,8 +47,10 @@ import { analyzeInstallHooks, extractInstallScripts } from "./install-hook-scann
 import { analyzeDependencyRisks } from "./dependency-risk-analyzer.js";
 import { correlateFindings } from "./correlation-engine.js";
 import { calculateTrustBreakdown } from "./trust-breakdown.js";
+import { loadPolicyConfig, applyPolicy, applyBaseline } from "./policy-engine.js";
+import { detectTrustSignals } from "./trust-signals.js";
 
-const TOOL_VERSION = "4.3.0";
+const TOOL_VERSION = "4.4.0";
 
 /**
  * Scan a local directory or GitHub repo for malware indicators.
@@ -86,7 +88,7 @@ export async function scan(options: ScanOptions): Promise<ScanReport> {
 
   // Collect files
   const allFiles = collectFiles(scanDir, options.maxDepth ?? 20);
-  const findings: Finding[] = [];
+  let findings: Finding[] = [];
 
   // Scan each file
   let filesScanned = 0;
@@ -244,12 +246,38 @@ export async function scan(options: ScanOptions): Promise<ScanReport> {
     findings.push(...goFindings);
   }
 
+  // v4.4: Detect positive trust signals (only for GitHub repo scans)
+  if (scanType === "github") {
+    const trustSignals = detectTrustSignals(scanDir);
+    findings.push(...trustSignals);
+  }
+
   // v4.2: Correlation engine — link findings into incidents
   const correlation = correlateFindings(findings);
 
   // v4.2: Trust breakdown (for directory/github scans with package.json)
   const hasLockfile = fs.existsSync(path.join(scanDir, "package-lock.json"));
   const trustBreakdown = calculateTrustBreakdown(findings, target, hasLockfile);
+
+  // v4.4: Apply policy config (if present)
+  let suppressedCount = 0;
+  const policy = loadPolicyConfig(scanDir);
+  if (policy) {
+    const policyResult = applyPolicy(findings, policy);
+    findings = policyResult.findings;
+    suppressedCount += policyResult.suppressedCount;
+  }
+
+  // v4.4: Apply baseline (if configured)
+  const baselineFile = options.baselineFile ?? policy?.baseline?.file;
+  if (baselineFile) {
+    const baselinePath = path.isAbsolute(baselineFile)
+      ? baselineFile
+      : path.join(scanDir, baselineFile);
+    const baselineResult = applyBaseline(findings, baselinePath);
+    findings = baselineResult.findings;
+    suppressedCount += baselineResult.suppressedCount;
+  }
 
   // Filter by severity and excluded rules
   const filteredFindings = filterFindings(findings, options);
@@ -279,6 +307,7 @@ export async function scan(options: ScanOptions): Promise<ScanReport> {
     recommendations,
     incidents: correlation.incidents.length > 0 ? correlation.incidents : undefined,
     trustBreakdown,
+    suppressedCount: suppressedCount > 0 ? suppressedCount : undefined,
   };
 }
 

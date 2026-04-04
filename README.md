@@ -131,6 +131,46 @@ supply-chain-guard scan ./project --min-severity high
 supply-chain-guard scan ./project --exclude SOLANA_MAINNET,HEX_ARRAY
 ```
 
+## Policy Configuration (v4.4)
+
+Create `.supply-chain-guard.yml` in your project root to customize behavior:
+
+```yaml
+rules:
+  disable:
+    - HEX_ARRAY
+    - CHARCODE_OBFUSCATION
+  severityOverrides:
+    GHA_UNPINNED_ACTION: medium
+
+allowlist:
+  packages:
+    - internal-utils
+  domains:
+    - company.internal
+  githubOrgs:
+    - my-org
+
+suppress:
+  - rule: RELEASE_EXE_ARTIFACT
+    reason: Legitimate Windows installer
+
+baseline:
+  file: .scg-baseline.json
+```
+
+## Baseline Diffing (v4.4)
+
+Only report NEW findings (ignore known baseline):
+
+```bash
+# Save current findings as baseline
+supply-chain-guard scan ./project --save-baseline .scg-baseline.json
+
+# On subsequent scans, only show new findings
+supply-chain-guard scan ./project --baseline .scg-baseline.json
+```
+
 ## Example Output
 
 ```
@@ -249,6 +289,14 @@ scan() -> collectFiles() -> per-file analysis
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. The most impactful contribution is adding new detection patterns for emerging threats.
 
 ## Changelog
+
+### v4.4.0 (2026-04-04)
+- **New: Policy Engine** -- `.supply-chain-guard.yml` config for rule disable, severity overrides, allowlists, suppressions
+- **New: Baseline System** -- `--save-baseline` / `--baseline` for diff-only CI scanning (only new findings)
+- **New: Trust Signals** -- positive indicators (SECURITY.md, CODEOWNERS, LICENSE, lockfile, repository link)
+- **New:** Secret exfiltration chain correlations (install hook + network + obfuscation)
+- **New:** Suppression count in reports
+- 18 new tests (482 total)
 
 ### v4.3.0 (2026-04-04)
 - Documentation overhaul: complete README rewrite covering all features through v4.2
