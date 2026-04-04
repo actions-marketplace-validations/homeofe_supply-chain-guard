@@ -19,6 +19,12 @@ export interface Finding {
   match?: string;
   /** Recommendation for remediation */
   recommendation: string;
+  /** Confidence score 0.0-1.0 (v4.2) */
+  confidence?: number;
+  /** Finding category (v4.2) */
+  category?: "malware" | "supply-chain" | "config" | "trust" | "info";
+  /** Correlation cluster ID (v4.2) */
+  correlationId?: string;
 }
 
 export interface ScanReport {
@@ -42,6 +48,10 @@ export interface ScanReport {
   riskLevel: "clean" | "low" | "medium" | "high" | "critical";
   /** Actionable recommendations */
   recommendations: string[];
+  /** Correlated incident clusters (v4.2) */
+  incidents?: IncidentCluster[];
+  /** Trust breakdown for npm/pypi packages (v4.2) */
+  trustBreakdown?: TrustBreakdown;
 }
 
 export interface ScanSummary {
@@ -128,6 +138,41 @@ export interface WatchlistAlert {
   txid: string;
   memo: string;
   timestamp: string;
+}
+
+// ---------------------------------------------------------------------------
+// v4.2 Correlation & Trust types
+// ---------------------------------------------------------------------------
+
+export interface IncidentCluster {
+  /** Unique cluster ID */
+  id: string;
+  /** Human-readable incident name */
+  name: string;
+  /** Highest severity in cluster */
+  severity: Severity;
+  /** Compound confidence (0.0-1.0) */
+  confidence: number;
+  /** Findings in this cluster */
+  findings: Finding[];
+  /** Auto-generated attack narrative */
+  narrative: string;
+  /** Rule IDs involved */
+  indicators: string[];
+}
+
+export interface TrustIndicator {
+  name: string;
+  status: "green" | "yellow" | "red";
+  detail: string;
+}
+
+export interface TrustBreakdown {
+  publisherTrust: { score: number; indicators: TrustIndicator[] };
+  codeQuality: { score: number; indicators: TrustIndicator[] };
+  dependencyTrust: { score: number; indicators: TrustIndicator[] };
+  releaseProcess: { score: number; indicators: TrustIndicator[] };
+  overallScore: number;
 }
 
 export const SEVERITY_SCORES: Record<Severity, number> = {

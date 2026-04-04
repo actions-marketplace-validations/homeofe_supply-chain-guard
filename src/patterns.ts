@@ -1207,3 +1207,103 @@ export const LURE_PATTERNS: PatternEntry[] = [
     rule: "FAKE_AI_TOOL_LURE",
   },
 ];
+
+// ---------------------------------------------------------------------------
+// Extended C2 + Secrets patterns (v4.2)
+// ---------------------------------------------------------------------------
+
+export const C2_EXTENDED_PATTERNS: PatternEntry[] = [
+  {
+    name: "c2-doh-resolver",
+    pattern:
+      "(?:cloudflare-dns\\.com|dns\\.google|dns\\.quad9\\.net)/dns-query|application/dns-json|application/dns-message",
+    description:
+      "DNS-over-HTTPS (DoH) resolver in code. Malware uses DoH to resolve C2 domains while bypassing network monitoring.",
+    severity: "high",
+    rule: "C2_DOH_RESOLVER",
+  },
+  {
+    name: "dead-drop-gist",
+    pattern:
+      "gist\\.github(?:usercontent)?\\.com/[a-zA-Z0-9]+/[a-f0-9]+",
+    description:
+      "GitHub Gist used as dead-drop resolver. Gists store C2 configuration that changes without updating malware code.",
+    severity: "high",
+    rule: "DEAD_DROP_GIST",
+  },
+  {
+    name: "c2-dynamic-config",
+    pattern:
+      "(?:fetch|https?\\.get|axios\\.get|got)\\s*\\([^)]*(?:config|settings|update|check|beacon|ping|heartbeat)[^)]*\\).*(?:eval|exec|Function|spawn)",
+    description:
+      "Dynamic config fetch followed by code execution. Runtime C2 command pattern.",
+    severity: "high",
+    rule: "C2_DYNAMIC_CONFIG",
+  },
+  {
+    name: "c2-websocket-dynamic",
+    pattern:
+      "new\\s+WebSocket\\s*\\(\\s*(?:`|\\+|atob|Buffer\\.from|decodeURI|String\\.fromCharCode)",
+    description:
+      "WebSocket connection with dynamically constructed URL. Hides C2 server address.",
+    severity: "high",
+    rule: "C2_WEBSOCKET_DYNAMIC",
+  },
+];
+
+export const SECRETS_PATTERNS: PatternEntry[] = [
+  {
+    name: "secrets-aws-key",
+    pattern:
+      "(?:AKIA|ASIA)[A-Z0-9]{16}",
+    description:
+      "AWS Access Key ID detected. Hardcoded AWS credentials can be used for unauthorized access.",
+    severity: "critical",
+    rule: "SECRETS_AWS_KEY",
+  },
+  {
+    name: "secrets-github-token",
+    pattern:
+      "(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,}|github_pat_[A-Za-z0-9_]{22,}",
+    description:
+      "GitHub personal access token detected. Exposed tokens grant repository access.",
+    severity: "critical",
+    rule: "SECRETS_GITHUB_TOKEN",
+  },
+  {
+    name: "secrets-private-key",
+    pattern:
+      "-----BEGIN\\s+(?:RSA|EC|OPENSSH|DSA|PGP)\\s+PRIVATE\\s+KEY-----",
+    description:
+      "Private key embedded in code. Exposed private keys compromise authentication and encryption.",
+    severity: "critical",
+    rule: "SECRETS_PRIVATE_KEY",
+  },
+  {
+    name: "secrets-ssh-key-read",
+    pattern:
+      "(?:readFile|readFileSync|open|cat|type).*(?:\\.ssh[/\\\\]id_|~[/\\\\]\\.ssh)",
+    description:
+      "Code reads SSH private key files. Infostealers exfiltrate SSH keys for lateral movement.",
+    severity: "critical",
+    rule: "SECRETS_SSH_KEY_READ",
+  },
+  {
+    name: "secrets-npm-token",
+    pattern:
+      "npm_[A-Za-z0-9]{36}",
+    description:
+      "npm automation token detected. Exposed tokens allow publishing malicious package versions.",
+    severity: "critical",
+    rule: "SECRETS_NPM_TOKEN",
+  },
+  {
+    name: "secrets-generic-api-key",
+    pattern:
+      "(?:api_key|apikey|api_secret|secret_key|auth_token)\\s*[=:]\\s*['\"][A-Za-z0-9+/=_-]{20,}['\"]",
+    description:
+      "Generic API key or secret detected in code.",
+    severity: "high",
+    rule: "SECRETS_GENERIC_API_KEY",
+  },
+];

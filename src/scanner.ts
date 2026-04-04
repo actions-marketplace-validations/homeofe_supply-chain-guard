@@ -40,9 +40,15 @@ import { analyzeGitHubTrust, parseGitHubUrl, scanReadmeLures } from "./github-tr
 import {
   INFOSTEALER_PATTERNS,
   LURE_PATTERNS,
+  C2_EXTENDED_PATTERNS,
+  SECRETS_PATTERNS,
 } from "./patterns.js";
+import { analyzeInstallHooks, extractInstallScripts } from "./install-hook-scanner.js";
+import { analyzeDependencyRisks } from "./dependency-risk-analyzer.js";
+import { correlateFindings } from "./correlation-engine.js";
+import { calculateTrustBreakdown } from "./trust-breakdown.js";
 
-const TOOL_VERSION = "4.1.0";
+const TOOL_VERSION = "4.2.0";
 
 /**
  * Scan a local directory or GitHub repo for malware indicators.
@@ -159,6 +165,26 @@ export async function scan(options: ScanOptions): Promise<ScanReport> {
         checkBinaryDownloadScripts(content, relativePath, findings);
         // Check for known-bad package versions (v4.1)
         checkKnownBadVersions(content, relativePath, findings);
+
+        // Deep install hook analysis (v4.2)
+        const hookScripts = extractInstallScripts(content);
+        if (hookScripts) {
+          const hookFindings = analyzeInstallHooks(hookScripts, relativePath);
+          findings.push(...hookFindings);
+        }
+
+        // Dependency risk analysis (v4.2)
+        try {
+          const pkg = JSON.parse(content) as Record<string, unknown>;
+          const allDeps = {
+            ...(pkg.dependencies as Record<string, string> | undefined),
+            ...(pkg.devDependencies as Record<string, string> | undefined),
+          };
+          if (Object.keys(allDeps).length > 0) {
+            const depFindings = analyzeDependencyRisks(allDeps, relativePath);
+            findings.push(...depFindings);
+          }
+        } catch { /* not valid JSON */ }
       }
 
       // Check package-lock.json for known-bad versions (v4.1)
@@ -218,12 +244,20 @@ export async function scan(options: ScanOptions): Promise<ScanReport> {
     findings.push(...goFindings);
   }
 
+  // v4.2: Correlation engine — link findings into incidents
+  const correlation = correlateFindings(findings);
+
+  // v4.2: Trust breakdown (for directory/github scans with package.json)
+  const hasLockfile = fs.existsSync(path.join(scanDir, "package-lock.json"));
+  const trustBreakdown = calculateTrustBreakdown(findings, target, hasLockfile);
+
   // Filter by severity and excluded rules
   const filteredFindings = filterFindings(findings, options);
 
-  // Calculate summary and score
+  // Calculate summary and score (with correlation risk boost)
   const summary = calculateSummary(allFiles.length, filesScanned, filteredFindings);
-  const score = calculateScore(filteredFindings);
+  const baseScore = calculateScore(filteredFindings);
+  const score = Math.min(100, baseScore + correlation.riskBoost);
   const riskLevel = getRiskLevel(score);
   const recommendations = generateRecommendations(filteredFindings);
 
@@ -243,6 +277,8 @@ export async function scan(options: ScanOptions): Promise<ScanReport> {
     score,
     riskLevel,
     recommendations,
+    incidents: correlation.incidents.length > 0 ? correlation.incidents : undefined,
+    trustBreakdown,
   };
 }
 
@@ -326,6 +362,8 @@ function checkFilePatterns(
     ...IAC_PATTERNS,
     ...INFOSTEALER_PATTERNS,
     ...LURE_PATTERNS,
+    ...C2_EXTENDED_PATTERNS,
+    ...SECRETS_PATTERNS,
   ];
 
   for (const pattern of allPatterns) {
