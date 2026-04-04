@@ -54,8 +54,15 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Verify npm token
-        run: npm whoami 2>&1 || echo "Token verification failed — check NPM_TOKEN secret"
+      - name: Debug npm auth
+        run: |
+          echo "--- .npmrc contents ---"
+          cat "${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}" 2>/dev/null || echo "no userconfig"
+          cat .npmrc 2>/dev/null || echo "no project .npmrc"
+          echo "--- token format check ---"
+          echo "${NODE_AUTH_TOKEN:0:4}...${NODE_AUTH_TOKEN: -4}" || echo "token empty"
+          echo "--- npm whoami ---"
+          npm whoami 2>&1 || true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
