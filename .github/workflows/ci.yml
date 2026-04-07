@@ -75,3 +75,34 @@ jobs:
         run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  release:
+    name: Create GitHub Release
+    needs: publish
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract changelog for this version
+        id: changelog
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Extract the section for this version from README.md
+          NOTES=$(awk "/^### v${VERSION}/,/^### v[0-9]/" README.md | head -n -1)
+          # Fallback if nothing found
+          if [ -z "$NOTES" ]; then
+            NOTES="See [README.md](https://github.com/${{ github.repository }}/blob/main/README.md#changelog) for full changelog."
+          fi
+          # Write to file to preserve multiline
+          echo "$NOTES" > release_notes.md
+
+      - name: Create GitHub Release
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "supply-chain-guard $GITHUB_REF_NAME" \
+            --notes-file release_notes.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
