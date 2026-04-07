@@ -57,185 +57,280 @@ function formatJson(report: ScanReport): string {
 }
 
 /**
- * Format as human-readable text with colors.
+ * Format as human-readable text with box-drawing borders and visual gauges.
  */
 function formatText(report: ScanReport): string {
   const lines: string[] = [];
 
-  // Header
-  lines.push("");
-  lines.push(`${BOLD}  supply-chain-guard${RESET} scan report`);
-  lines.push(`${DIM}  ${"─".repeat(50)}${RESET}`);
-  lines.push(`  Target:    ${report.target}`);
-  lines.push(`  Type:      ${report.scanType}`);
-  lines.push(`  Time:      ${report.timestamp}`);
-  lines.push(`  Duration:  ${report.durationMs}ms`);
-  lines.push("");
+  // ── layout constants ───────────────────────────────────────────────────────
+  const VERSION = "5.1.0";
+  const W = 76; // visible chars between "│ " and " │" (total line = 80)
 
-  // Score
-  const scoreColor =
-    report.score === 0
-      ? "\x1b[32m"
-      : report.score <= 10
-        ? "\x1b[36m"
-        : report.score <= 30
-          ? "\x1b[33m"
-          : report.score <= 60
-            ? "\x1b[31m"
-            : "\x1b[91m";
+  // ── ANSI helpers ───────────────────────────────────────────────────────────
+  const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+  const visLen = (s: string) => stripAnsi(s).length;
+  /** Pad string to n *visible* chars, appending ch. */
+  const padR = (s: string, n: number, ch = " ") =>
+    s + ch.repeat(Math.max(0, n - visLen(s)));
+  /** Truncate to n visible chars, adding ellipsis if needed. */
+  const trunc = (s: string, n: number) =>
+    visLen(s) <= n ? s : stripAnsi(s).slice(0, n - 1) + "…";
 
-  lines.push(
-    `  Risk Score: ${scoreColor}${BOLD}${report.score}/100${RESET} (${report.riskLevel.toUpperCase()})`,
-  );
-  if (report.slsaLevel !== undefined) {
-    const slsaColor = report.slsaLevel >= 3 ? "\x1b[32m" : report.slsaLevel === 2 ? "\x1b[36m" : report.slsaLevel === 1 ? "\x1b[33m" : "\x1b[31m";
-    lines.push(`  SLSA Level:  ${slsaColor}${BOLD}${report.slsaLevel}/3${RESET}`);
+  // ── box-drawing helpers ────────────────────────────────────────────────────
+  const boxTop = (title = "") => {
+    if (!title) return "┌" + "─".repeat(78) + "┐";
+    const t = `  ${title}  `;
+    const rem = 78 - t.length;
+    const l = Math.floor(rem / 2);
+    return "┌" + "─".repeat(l) + t + "─".repeat(rem - l) + "┐";
+  };
+  const boxBot  = ()  => "└" + "─".repeat(78) + "┘";
+  const boxDiv  = ()  => "├" + "─".repeat(78) + "┤";
+  const boxBlank = () => "│" + " ".repeat(78) + "│";
+  const boxDot  = ()  => "│ " + DIM + "·".repeat(76) + RESET + " │";
+  /** Row whose visible content is exactly W chars (padding added automatically). */
+  const boxRow  = (s = "") => "│ " + padR(s, W) + " │";
+
+  // ── color/bar helpers ──────────────────────────────────────────────────────
+  const scoreColor = (score: number) =>
+    score === 0    ? "\x1b[32m"  // green
+    : score <= 10  ? "\x1b[36m"  // cyan
+    : score <= 30  ? "\x1b[33m"  // yellow
+    : score <= 60  ? "\x1b[31m"  // red
+    : "\x1b[91m";                 // bright red
+
+  const trustColor = (score: number) =>
+    score >= 80 ? "\x1b[32m" : score >= 50 ? "\x1b[33m" : "\x1b[31m";
+
+  const riskColor = (score: number) =>
+    score <= 20 ? "\x1b[32m" : score <= 50 ? "\x1b[33m" : "\x1b[31m";
+
+  const mkBar = (value: number, max: number, width: number) => {
+    const n = max > 0 ? Math.round((value / max) * width) : 0;
+    return "█".repeat(n) + "░".repeat(width - n);
+  };
+
+  // ── HEADER ─────────────────────────────────────────────────────────────────
+  lines.push("");
+  lines.push("╔" + "═".repeat(78) + "╗");
+  {
+    const label = "  supply-chain-guard";          // 20 visible chars
+    const ver   = `v${VERSION}  `;                 // e.g. "v5.1.0  " = 8 visible
+    const spaces = " ".repeat(Math.max(0, 78 - label.length - ver.length));
+    lines.push("║" + BOLD + label + RESET + spaces + DIM + ver + RESET + "║");
   }
-  if (report.sbomDocument) {
-    lines.push(`  SBOM:        ${DIM}CycloneDX 1.6 — ${report.sbomDocument.components.length} component(s)${RESET}`);
-  }
+  lines.push("╚" + "═".repeat(78) + "╝");
   lines.push("");
 
-  // Summary
-  lines.push(`${BOLD}  Summary${RESET}`);
-  lines.push(`${DIM}  ${"─".repeat(50)}${RESET}`);
+  // ── METADATA ───────────────────────────────────────────────────────────────
+  const metaRow = (key: string, val: string) =>
+    `  ${BOLD}${key.padEnd(10)}${RESET}${val}`;
 
+  lines.push(metaRow("Target", report.target));
   if (report.scanType === "directory" || report.scanType === "github") {
-    lines.push(`  Files:     ${report.summary.filesScanned}/${report.summary.totalFiles} scanned`);
-  }
-
-  const counts = [
-    report.summary.critical > 0
-      ? `${SEVERITY_COLORS.critical}${report.summary.critical} critical${RESET}`
-      : null,
-    report.summary.high > 0
-      ? `${SEVERITY_COLORS.high}${report.summary.high} high${RESET}`
-      : null,
-    report.summary.medium > 0
-      ? `${SEVERITY_COLORS.medium}${report.summary.medium} medium${RESET}`
-      : null,
-    report.summary.low > 0
-      ? `${SEVERITY_COLORS.low}${report.summary.low} low${RESET}`
-      : null,
-    report.summary.info > 0
-      ? `${SEVERITY_COLORS.info}${report.summary.info} info${RESET}`
-      : null,
-  ].filter(Boolean);
-
-  if (counts.length > 0) {
-    lines.push(`  Findings:  ${counts.join(", ")}`);
+    lines.push(metaRow("Type", `${report.scanType}  ·  ${report.summary.filesScanned} / ${report.summary.totalFiles} files scanned`));
   } else {
-    lines.push(`  Findings:  \x1b[32mNone${RESET}`);
+    lines.push(metaRow("Type", report.scanType));
   }
-  if (report.suppressedCount && report.suppressedCount > 0) {
-    lines.push(`  Suppressed: ${DIM}${report.suppressedCount} finding(s) by policy/baseline${RESET}`);
-  }
+  lines.push(metaRow("Duration", `${report.durationMs}ms`));
+  lines.push(metaRow("Time", report.timestamp));
   lines.push("");
 
-  // Findings
-  if (report.findings.length > 0) {
-    lines.push(`${BOLD}  Findings${RESET}`);
-    lines.push(`${DIM}  ${"─".repeat(50)}${RESET}`);
+  // ── RISK SCORE ─────────────────────────────────────────────────────────────
+  {
+    const sc    = report.score;
+    const scCol = scoreColor(sc);
+    const level = report.riskLevel.toUpperCase();
+    const BAR_W = 36;
+    const filled = Math.round((sc / 100) * BAR_W);
+    const gauge  = scCol + "█".repeat(filled) + DIM + "░".repeat(BAR_W - filled) + RESET;
+    const scoreStr = `${sc} / 100`;
 
-    // Sort by severity (critical first)
+    lines.push(boxTop("RISK SCORE"));
+    lines.push(boxBlank());
+    lines.push(boxRow(`  ${scCol}${BOLD}${scoreStr}${RESET}   ${gauge}   ${BOLD}${scCol}${level}${RESET}`));
+
+    if (report.slsaLevel !== undefined) {
+      const slsaCol = report.slsaLevel >= 3 ? "\x1b[32m" : report.slsaLevel === 2 ? "\x1b[36m" : report.slsaLevel === 1 ? "\x1b[33m" : "\x1b[31m";
+      const slsaBar = slsaCol + mkBar(report.slsaLevel, 3, 24) + RESET;
+      lines.push(boxRow(`  ${DIM}SLSA${RESET}        ${slsaBar}  ${slsaCol}${BOLD}${report.slsaLevel}/3${RESET}`));
+    }
+    if (report.sbomDocument) {
+      lines.push(boxRow(`  ${DIM}SBOM${RESET}        CycloneDX 1.6  ·  ${report.sbomDocument.components.length} components`));
+    }
+
+    lines.push(boxBlank());
+    lines.push(boxBot());
+    lines.push("");
+  }
+
+  // ── FINDINGS SUMMARY ───────────────────────────────────────────────────────
+  {
+    const totalFindings =
+      report.summary.critical + report.summary.high +
+      report.summary.medium  + report.summary.low  + report.summary.info;
+
+    lines.push(boxTop("FINDINGS SUMMARY"));
+
+    if (totalFindings === 0) {
+      lines.push(boxBlank());
+      lines.push(boxRow(`  \x1b[32m${BOLD}✓  No findings — clean${RESET}`));
+      lines.push(boxBlank());
+    } else {
+      const maxCount = Math.max(
+        report.summary.critical, report.summary.high,
+        report.summary.medium,  report.summary.low, report.summary.info,
+      );
+      const BAR_W = 32;
+      const sevRow = (label: string, count: number, color: string) => {
+        const countStr = String(count).padStart(3);
+        const b = count > 0
+          ? color + mkBar(count, maxCount, BAR_W) + RESET
+          : DIM + "─".repeat(BAR_W) + RESET;
+        return boxRow(`  ${color}${BOLD}${label.padEnd(10)}${RESET}  ${countStr}  ${b}`);
+      };
+      lines.push(sevRow("CRITICAL", report.summary.critical, SEVERITY_COLORS.critical));
+      lines.push(sevRow("HIGH",     report.summary.high,     SEVERITY_COLORS.high));
+      lines.push(sevRow("MEDIUM",   report.summary.medium,   SEVERITY_COLORS.medium));
+      lines.push(sevRow("LOW",      report.summary.low,      SEVERITY_COLORS.low));
+      lines.push(sevRow("INFO",     report.summary.info,     SEVERITY_COLORS.info));
+      if (report.suppressedCount && report.suppressedCount > 0) {
+        lines.push(boxBlank());
+        lines.push(boxRow(`  ${DIM}${report.suppressedCount} finding(s) suppressed by policy / baseline${RESET}`));
+      }
+    }
+
+    lines.push(boxBot());
+    lines.push("");
+  }
+
+  // ── FINDINGS DETAIL ────────────────────────────────────────────────────────
+  if (report.findings.length > 0) {
     const sorted = [...report.findings].sort(
       (a, b) => severityRank(b.severity) - severityRank(a.severity),
     );
 
-    for (const finding of sorted) {
-      lines.push("");
-      lines.push(
-        `  ${SEVERITY_ICONS[finding.severity]} ${SEVERITY_COLORS[finding.severity]}${BOLD}[${finding.severity.toUpperCase()}]${RESET} ${finding.description}`,
-      );
-      lines.push(`     Rule: ${finding.rule}`);
-      if (finding.file) {
-        const location = finding.line
-          ? `${finding.file}:${finding.line}`
-          : finding.file;
-        lines.push(`     File: ${location}`);
+    lines.push(boxTop("FINDINGS"));
+    lines.push(boxBlank());
+
+    for (let i = 0; i < sorted.length; i++) {
+      const f      = sorted[i];
+      const color  = SEVERITY_COLORS[f.severity];
+      const label  = `[${f.severity.toUpperCase()}]`;   // e.g. "[CRITICAL]" = 10
+      const indent = " ".repeat(label.length + 2);
+      const avail  = W - label.length - 4;              // content width after indent
+
+      lines.push(boxRow(`  ${color}${BOLD}${label}${RESET}  ${BOLD}${trunc(f.rule, avail)}${RESET}`));
+      lines.push(boxRow(`  ${indent}${trunc(f.description, avail)}`));
+      if (f.file) {
+        const loc = f.line ? `${f.file}:${f.line}` : f.file;
+        lines.push(boxRow(`  ${indent}${DIM}${trunc(loc, avail)}${RESET}`));
       }
-      if (finding.match) {
-        lines.push(`     Match: ${DIM}${finding.match}${RESET}`);
+      if (f.match) {
+        const matchTag = "match  ";
+        lines.push(boxRow(`  ${indent}${DIM}${matchTag}${RESET}${trunc(f.match, avail - matchTag.length)}`));
       }
-      lines.push(`     Fix: ${finding.recommendation}`);
+      const fixTag = "fix    ";
+      lines.push(boxRow(`  ${indent}${DIM}${fixTag}${RESET}${trunc(f.recommendation, avail - fixTag.length)}`));
+
+      if (i < sorted.length - 1) {
+        lines.push(boxBlank());
+        lines.push(boxDot());
+        lines.push(boxBlank());
+      }
     }
+
+    lines.push(boxBlank());
+    lines.push(boxBot());
     lines.push("");
   }
 
-  // Trust Breakdown (v4.2)
+  // ── TRUST BREAKDOWN ────────────────────────────────────────────────────────
   if (report.trustBreakdown) {
-    const tb = report.trustBreakdown;
-    lines.push(`${BOLD}  Trust Breakdown${RESET}`);
-    lines.push(`${DIM}  ${"─".repeat(50)}${RESET}`);
-    const bar = (score: number) => {
-      const filled = Math.round(score / 10);
-      return "\u2588".repeat(filled) + "\u2591".repeat(10 - filled);
+    const tb   = report.trustBreakdown;
+    const BAR_W = 32;
+    const tbRow = (label: string, score: number) => {
+      const col = trustColor(score);
+      return boxRow(`  ${label.padEnd(14)}${col}${mkBar(score, 100, BAR_W)}${RESET}  ${col}${score}/100${RESET}`);
     };
-    const color = (score: number) => score >= 80 ? "\x1b[32m" : score >= 50 ? "\x1b[33m" : "\x1b[31m";
-    lines.push(`  Publisher:   ${color(tb.publisherTrust.score)}${bar(tb.publisherTrust.score)} ${tb.publisherTrust.score}/100${RESET}`);
-    lines.push(`  Code:        ${color(tb.codeQuality.score)}${bar(tb.codeQuality.score)} ${tb.codeQuality.score}/100${RESET}`);
-    lines.push(`  Deps:        ${color(tb.dependencyTrust.score)}${bar(tb.dependencyTrust.score)} ${tb.dependencyTrust.score}/100${RESET}`);
-    lines.push(`  Release:     ${color(tb.releaseProcess.score)}${bar(tb.releaseProcess.score)} ${tb.releaseProcess.score}/100${RESET}`);
-    lines.push(`  ${BOLD}Overall:     ${color(tb.overallScore)}${bar(tb.overallScore)} ${tb.overallScore}/100${RESET}`);
+
+    lines.push(boxTop("TRUST BREAKDOWN"));
+    lines.push(tbRow("Publisher",    tb.publisherTrust.score));
+    lines.push(tbRow("Code",         tb.codeQuality.score));
+    lines.push(tbRow("Dependencies", tb.dependencyTrust.score));
+    lines.push(tbRow("Release",      tb.releaseProcess.score));
+    lines.push(boxDiv());
+    lines.push(tbRow("Overall",      tb.overallScore));
+    lines.push(boxBot());
     lines.push("");
   }
 
-  // Risk Dimensions (v4.5)
+  // ── RISK DIMENSIONS ────────────────────────────────────────────────────────
   if (report.riskDimensions) {
-    const rd = report.riskDimensions;
-    lines.push(`${BOLD}  Risk Dimensions${RESET}`);
-    lines.push(`${DIM}  ${"─".repeat(50)}${RESET}`);
-    const bar = (score: number) => {
-      const filled = Math.round(score / 10);
-      return "\u2588".repeat(filled) + "\u2591".repeat(10 - filled);
+    const rd    = report.riskDimensions;
+    const BAR_W = 32;
+    const rdRow = (label: string, score: number) => {
+      const col = riskColor(score);
+      return boxRow(`  ${label.padEnd(14)}${col}${mkBar(score, 100, BAR_W)}${RESET}  ${col}${score}/100${RESET}`);
     };
-    const color = (score: number) => score <= 20 ? "\x1b[32m" : score <= 50 ? "\x1b[33m" : "\x1b[31m";
-    lines.push(`  Code Risk:    ${color(rd.codeRisk)}${bar(rd.codeRisk)} ${rd.codeRisk}/100${RESET}`);
-    lines.push(`  Dep Risk:     ${color(rd.dependencyRisk)}${bar(rd.dependencyRisk)} ${rd.dependencyRisk}/100${RESET}`);
-    lines.push(`  Repo Trust:   ${color(rd.repoTrust)}${bar(rd.repoTrust)} ${rd.repoTrust}/100${RESET}`);
-    lines.push(`  CI/CD Risk:   ${color(rd.ciCdRisk)}${bar(rd.ciCdRisk)} ${rd.ciCdRisk}/100${RESET}`);
+
+    lines.push(boxTop("RISK DIMENSIONS"));
+    lines.push(rdRow("Code Risk",   rd.codeRisk));
+    lines.push(rdRow("Dep Risk",    rd.dependencyRisk));
+    lines.push(rdRow("Repo Trust",  rd.repoTrust));
+    lines.push(rdRow("CI/CD Risk",  rd.ciCdRisk));
     if (rd.threatIntelMatches > 0) {
-      lines.push(`  ${SEVERITY_COLORS.critical}Threat Intel:  ${rd.threatIntelMatches} match(es)${RESET}`);
+      lines.push(boxRow(`  ${SEVERITY_COLORS.critical}${BOLD}Threat Intel    ${rd.threatIntelMatches} match(es)${RESET}`));
     }
-    lines.push(`  Confidence:   ${Math.round(rd.confidence * 100)}%`);
+    lines.push(boxRow(`  ${DIM}Confidence      ${Math.round(rd.confidence * 100)}%${RESET}`));
+    lines.push(boxBot());
     lines.push("");
   }
 
-  // Correlated Incidents (v4.2)
+  // ── CORRELATED INCIDENTS ───────────────────────────────────────────────────
   if (report.incidents && report.incidents.length > 0) {
-    lines.push(`${BOLD}  Correlated Incidents${RESET}`);
-    lines.push(`${DIM}  ${"─".repeat(50)}${RESET}`);
+    lines.push(boxTop("CORRELATED INCIDENTS"));
+    lines.push(boxBlank());
     for (const incident of report.incidents) {
-      const conf = Math.round(incident.confidence * 100);
-      lines.push("");
-      lines.push(`  ${SEVERITY_COLORS[incident.severity]}${BOLD}[${incident.severity.toUpperCase()}]${RESET} ${incident.name} (${conf}% confidence)`);
-      lines.push(`  ${DIM}${incident.narrative}${RESET}`);
-      lines.push(`  Indicators: ${incident.indicators.join(", ")}`);
+      const conf  = Math.round(incident.confidence * 100);
+      const color = SEVERITY_COLORS[incident.severity];
+      const label = `[${incident.severity.toUpperCase()}]`;
+      lines.push(boxRow(`  ${color}${BOLD}${label}${RESET}  ${BOLD}${trunc(incident.name, W - label.length - 20)}${RESET}  ${DIM}${conf}% confidence${RESET}`));
+      lines.push(boxRow(`  ${DIM}${trunc(incident.narrative, W - 2)}${RESET}`));
+      lines.push(boxRow(`  Indicators: ${DIM}${trunc(incident.indicators.join(", "), W - 14)}${RESET}`));
+      lines.push(boxBlank());
     }
+    lines.push(boxBot());
     lines.push("");
   }
 
-  // Remediations (v4.6)
+  // ── REMEDIATION PLAN ───────────────────────────────────────────────────────
   if (report.remediations && report.remediations.length > 0) {
-    lines.push(`${BOLD}  Remediation Plan${RESET}`);
-    lines.push(`${DIM}  ${"─".repeat(50)}${RESET}`);
+    lines.push(boxTop("REMEDIATION PLAN"));
+    lines.push(boxBlank());
     for (const rem of report.remediations.slice(0, 5)) {
-      const pColor = rem.priority === "critical" ? SEVERITY_COLORS.critical : rem.priority === "high" ? SEVERITY_COLORS.high : SEVERITY_COLORS.medium;
-      lines.push(`  ${pColor}[${rem.priority.toUpperCase()}]${RESET} ${rem.title}`);
+      const pColor = rem.priority === "critical" ? SEVERITY_COLORS.critical
+        : rem.priority === "high" ? SEVERITY_COLORS.high : SEVERITY_COLORS.medium;
+      const label = `[${rem.priority.toUpperCase()}]`;
+      lines.push(boxRow(`  ${pColor}${BOLD}${label}${RESET}  ${BOLD}${trunc(rem.title, W - label.length - 4)}${RESET}`));
       for (const step of rem.steps) {
-        lines.push(`    ${DIM}${step}${RESET}`);
+        lines.push(boxRow(`       ${DIM}→  ${trunc(step, W - 10)}${RESET}`));
       }
-      lines.push("");
+      lines.push(boxBlank());
     }
+    lines.push(boxBot());
+    lines.push("");
   }
 
-  // Recommendations
+  // ── RECOMMENDATIONS ────────────────────────────────────────────────────────
   if (report.recommendations.length > 0) {
-    lines.push(`${BOLD}  Recommendations${RESET}`);
-    lines.push(`${DIM}  ${"─".repeat(50)}${RESET}`);
+    lines.push(boxTop("RECOMMENDATIONS"));
+    lines.push(boxBlank());
     for (const rec of report.recommendations) {
-      lines.push(`  • ${rec}`);
+      lines.push(boxRow(`  ›  ${trunc(rec, W - 5)}`));
     }
+    lines.push(boxBlank());
+    lines.push(boxBot());
     lines.push("");
   }
 
@@ -408,7 +503,7 @@ function formatSarif(report: ScanReport): string {
         tool: {
           driver: {
             name: "supply-chain-guard",
-            version: "4.8.0",
+            version: "5.1.0",
             informationUri: "https://github.com/homeofe/supply-chain-guard",
             rules,
           },
@@ -474,7 +569,7 @@ function formatSbom(report: ScanReport): string {
       timestamp: report.timestamp,
       tools: {
         components: [
-          { type: "application", name: "supply-chain-guard", version: "4.9.0" },
+          { type: "application", name: "supply-chain-guard", version: "5.1.0" },
         ],
       },
       component: {
@@ -639,7 +734,7 @@ footer{text-align:center;padding:24px;color:#94a3b8;font-size:13px}
   ` : ""}
 
   <footer>
-    Generated by <a href="https://github.com/homeofe/supply-chain-guard">supply-chain-guard</a> v4.8.0
+    Generated by <a href="https://github.com/homeofe/supply-chain-guard">supply-chain-guard</a> v5.1.0
   </footer>
 </div>
 <script>
