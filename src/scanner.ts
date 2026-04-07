@@ -69,7 +69,7 @@ import { generateSbomDocument } from "./sbom-generator.js";
 import { verifySLSA, getSLSALevel } from "./slsa-verifier.js";
 import { scanPypiDependencyConfusion } from "./dependency-confusion.js";
 
-const TOOL_VERSION = "5.0.0";
+const TOOL_VERSION = "5.0.1";
 
 /**
  * Scan a local directory or GitHub repo for malware indicators.
