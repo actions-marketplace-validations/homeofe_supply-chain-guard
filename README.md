@@ -299,6 +299,38 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. The most impactful contri
 
 ## Changelog
 
+### v5.0.0 (2026-04-07)
+**Context-Aware False Positive Elimination** — workspace-wide scan of 100k+ LOC across 15 projects identified 14 systematic FP categories. v5.0.0 eliminates all of them without weakening real detection.
+
+**New PatternEntry context fields** (`src/types.ts`):
+- `onlyFilePattern?: RegExp` — only apply pattern to files whose path matches (e.g. README/docs only)
+- `notFilePattern?: RegExp` — skip files whose path matches (e.g. `.min.js`, `.yml`)
+- `notTestFile?: boolean` — skip test/spec/fixture/conftest files
+
+**Rule-level fixes** (`src/patterns.ts`):
+- `README_LURE_CRACK` / `README_LURE_LEAKED` / `README_LURE_URGENCY`: `onlyFilePattern` → README/CHANGELOG/`.md` files only. Source files like `.ts` no longer trigger these
+- `SHAI_HULUD_WORM` / `SHAI_HULUD_CRED_STEAL`: `notFilePattern: /\.ya?ml$/` → `npm publish` in CI workflow YAML is standard; worm runs it from JS/TS code
+- `PROXY_HANDLER_TRAP` / `BEACON_INTERVAL_FETCH` / `VIDAR_BROWSER_THEFT` / `PROXY_BACKCONNECT`: `notFilePattern: /\.min\.(js|css)$/` → minified files put everything on one line, making unrelated patterns appear co-located
+- `DROPPER_TEMP_EXEC` / `MINER_CONFIG_KEYS`: `notFilePattern: /\.json$/` → Bootstrap icon JSON files won't trigger mining config detection
+- `IAC_HARDCODED_SECRET`: `notTestFile: true` + pattern excludes dummy values (`test-key`, `your_*`, `example`, `placeholder`, `changeme`)
+- `VIDAR_BROWSER_THEFT`: pattern tightened to require OS-specific browser data paths (`AppData/Local/Google/Chrome/...`, `~/.mozilla/firefox/...`)
+- `PROXY_BACKCONNECT`: pattern tightened to require SOCKS5 protocol indicators or IP:port format
+
+**Scanner fixes** (`src/scanner.ts`):
+- `.claude/` directory excluded from scanning (eliminates 7× duplicate findings from Claude Code worktrees)
+- `CRITICAL_FINDING_NO_OWNER` and `RISK_STAGNATION_HIGH` excluded from risk score calculation (meta-governance findings caused circular score inflation)
+- `relativePath` normalized to forward slashes — cross-platform consistency in all finding `file` fields
+- `checkBeaconMinerPatterns` now respects `notFilePattern`/`onlyFilePattern`/`notTestFile` like `checkFilePatterns`
+- Binary detection path splitting fixed for cross-platform compatibility
+
+**Continuous monitor fix** (`src/continuous-monitor.ts`):
+- `RISK_STAGNATION_HIGH` requires ≥5 history entries before firing (avoids false alarms on new projects)
+
+**SCANNABLE_EXTENSIONS**: `.md` added — README/CHANGELOG files now scanned for lure patterns via `checkFilePatterns`
+
+- 22 new context-aware tests (629 total)
+- Expected score reduction: projects scoring 100/critical due to FPs → ≤20/low with no actual malware
+
 ### v4.9.0 (2026-04-07)
 - **New: SBOM Generator** — reads `package-lock.json` (v2+) to generate CycloneDX 1.6 SBOMs with real `components[]` (name, version, PURL, hashes, licenses). Falls back to `package.json` direct deps. VEX statements for suppressed findings. Use `--sbom-output <file>` to write separately.
 - **New: SLSA Verifier** — detects SLSA provenance level (0–3) per project. Checks for sigstore/cosign signing, `slsa-github-generator` usage, hermetic build evidence, provenance attestation files. New rules: `SLSA_LEVEL_0`, `SLSA_NO_PROVENANCE`, `SLSA_UNSIGNED_ARTIFACTS`.

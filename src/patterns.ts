@@ -683,6 +683,7 @@ export const BEACON_MINER_PATTERNS: PatternEntry[] = [
       "Periodic network request detected (setInterval + fetch). This is a common beacon pattern for C2 communication.",
     severity: "medium",
     rule: "BEACON_INTERVAL_FETCH",
+    notFilePattern: /\.min\.(js|css)$/,
   },
   {
     name: "beacon-settimeout-fetch",
@@ -721,6 +722,7 @@ export const BEACON_MINER_PATTERNS: PatternEntry[] = [
       "Mining configuration keys detected. This may be a cryptocurrency miner configuration.",
     severity: "high",
     rule: "MINER_CONFIG_KEYS",
+    notFilePattern: /\.json$/,
   },
   {
     name: "coinhive-reference",
@@ -787,6 +789,7 @@ export const SCANNABLE_EXTENSIONS = new Set([
   ".tf",
   ".hcl",
   ".svg",
+  ".md",
 ]);
 
 /** Maximum file size to scan (in bytes). Files larger than this are skipped. */
@@ -896,6 +899,7 @@ export const CAMPAIGN_PATTERNS_V2: PatternEntry[] = [
       "Self-publishing pattern detected. The Shai-Hulud worm replicates by publishing infected packages via npm.",
     severity: "critical",
     rule: "SHAI_HULUD_WORM",
+    notFilePattern: /\.ya?ml$/,
   },
   {
     name: "shai-hulud-npmrc-steal",
@@ -905,6 +909,7 @@ export const CAMPAIGN_PATTERNS_V2: PatternEntry[] = [
       "npm credentials access pattern. The Shai-Hulud worm steals .npmrc tokens to publish malicious packages.",
     severity: "high",
     rule: "SHAI_HULUD_CRED_STEAL",
+    notFilePattern: /\.ya?ml$/,
   },
 
   // Expanded protestware
@@ -941,6 +946,7 @@ export const OBFUSCATION_PATTERNS_V2: PatternEntry[] = [
       "Proxy handler trap detected. Proxy objects can intercept and modify all object operations.",
     severity: "high",
     rule: "PROXY_HANDLER_TRAP",
+    notFilePattern: /\.min\.(js|css)$/,
   },
   {
     name: "dynamic-import-expression",
@@ -1016,11 +1022,12 @@ export const IAC_PATTERNS: PatternEntry[] = [
   {
     name: "iac-hardcoded-secret",
     pattern:
-      '(?:password|secret_key|access_key|api_key|private_key|token)\\s*=\\s*"[^"]{8,}"',
+      '(?:password|secret_key|access_key|api_key|private_key|token)\\s*=\\s*"(?!(?:test|example|dummy|placeholder|your_|TODO|REPLACE|<|changeme|secret_here|xxx|none|null|false|true)[^"]*")[^"]{8,}"',
     description:
       "Hardcoded secret in IaC configuration file. Secrets should use variables or secret managers.",
     severity: "critical",
     rule: "IAC_HARDCODED_SECRET",
+    notTestFile: true,
   },
   {
     name: "iac-remote-exec",
@@ -1080,11 +1087,12 @@ export const INFOSTEALER_PATTERNS: PatternEntry[] = [
   {
     name: "vidar-browser-theft",
     pattern:
-      "(?:Login Data|Cookies|Web Data|History|Local State).*(?:sqlite|sql|copy|read|open)|AppData.*(?:Local|Roaming).*(?:Google|Mozilla|BraveSoftware|Microsoft.*Edge)",
+      "(?:AppData[/\\\\](?:Local|Roaming)[/\\\\](?:Google|Mozilla|BraveSoftware|Microsoft[/\\\\]Edge)|Library[/\\\\]Application Support[/\\\\](?:Firefox|Google[/\\\\]Chrome|BraveSoftware)|\\.mozilla[/\\\\]firefox|\\.config[/\\\\](?:google-chrome|chromium)).*(?:Login Data|Cookies|Web Data|Local State|key4\\.db|logins\\.json)",
     description:
       "Browser credential/cookie file access pattern. Infostealers (Vidar, Lumma, RedLine) steal browser data from these paths.",
     severity: "high",
     rule: "VIDAR_BROWSER_THEFT",
+    notFilePattern: /\.min\.(js|css)$/,
   },
 
   // Crypto wallet theft patterns
@@ -1111,11 +1119,12 @@ export const INFOSTEALER_PATTERNS: PatternEntry[] = [
   {
     name: "proxy-backconnect",
     pattern:
-      "backconnect|back_connect|reverse.*proxy.*register|proxy.*checkin|residential.*proxy",
+      "(?:socks[45]?://|\\bsocks[45]\\b.*\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}|backconnect.*:\\d{4,5}|residential.*proxy.*\\d{1,3}\\.\\d{1,3}|back_connect|proxy.*checkin)",
     description:
       "Reverse proxy/backconnect pattern. Infected machines are registered as proxy nodes for criminal infrastructure.",
     severity: "high",
     rule: "PROXY_BACKCONNECT",
+    notFilePattern: /\.min\.(js|css)$/,
   },
 
   // Dropper / loader patterns
@@ -1127,6 +1136,7 @@ export const INFOSTEALER_PATTERNS: PatternEntry[] = [
       "Dropper pattern: writing and executing files in temporary directories.",
     severity: "critical",
     rule: "DROPPER_TEMP_EXEC",
+    notFilePattern: /\.json$/,
   },
   {
     name: "dropper-antivm",
@@ -1161,6 +1171,7 @@ export const LURE_PATTERNS: PatternEntry[] = [
       "README contains 'leaked source/code' language. This is a common social engineering lure for malware distribution.",
     severity: "high",
     rule: "README_LURE_LEAKED",
+    onlyFilePattern: /README|CHANGELOG|DESCRIPTION|release[-_]notes|\.md$/i,
   },
   {
     name: "readme-lure-crack",
@@ -1170,6 +1181,7 @@ export const LURE_PATTERNS: PatternEntry[] = [
       "README contains crack/keygen/unlock language. Malware repos promise premium features to lure downloads.",
     severity: "critical",
     rule: "README_LURE_CRACK",
+    onlyFilePattern: /README|CHANGELOG|DESCRIPTION|release[-_]notes|\.md$/i,
   },
   {
     name: "readme-lure-urgency",
@@ -1179,6 +1191,7 @@ export const LURE_PATTERNS: PatternEntry[] = [
       "README uses urgency language to pressure downloads. Classic social engineering tactic.",
     severity: "medium",
     rule: "README_LURE_URGENCY",
+    onlyFilePattern: /README|CHANGELOG|DESCRIPTION|release[-_]notes|\.md$/i,
   },
   {
     name: "campaign-claude-lure",

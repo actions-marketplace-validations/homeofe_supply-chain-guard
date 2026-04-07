@@ -375,6 +375,12 @@ export interface PatternEntry {
   rule: string;
   /** If set, only apply this pattern to files with these extensions (e.g. [".svg"]) */
   onlyExtensions?: string[];
+  /** If set, only apply this pattern to files whose path matches this regex (e.g. README/docs) */
+  onlyFilePattern?: RegExp;
+  /** If set, skip files whose path matches this regex (e.g. /\.min\.(js|css)$/ or /\.ya?ml$/) */
+  notFilePattern?: RegExp;
+  /** If true, skip files that look like test/spec/mock/fixture files */
+  notTestFile?: boolean;
 }
 
 export interface WatchlistEntry {

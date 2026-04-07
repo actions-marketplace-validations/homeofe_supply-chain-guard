@@ -95,8 +95,9 @@ export function analyzeRiskTrend(
     }
   }
 
-  // Stagnation at high risk
-  if (recent.every((h) => h.score > 50) && recent.length >= 3) {
+  // Stagnation at high risk — require at least 5 history entries to avoid
+  // false alarms from new projects that haven't been remediated yet
+  if (history.length >= 5 && recent.every((h) => h.score > 50) && recent.length >= 3) {
     findings.push({
       rule: "RISK_STAGNATION_HIGH",
       description: `Risk score has remained above 50 for the last ${recent.length} scans. High risk is not being remediated.`,

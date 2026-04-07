@@ -69,7 +69,7 @@ import { generateSbomDocument } from "./sbom-generator.js";
 import { verifySLSA, getSLSALevel } from "./slsa-verifier.js";
 import { scanPypiDependencyConfusion } from "./dependency-confusion.js";
 
-const TOOL_VERSION = "4.9.0";
+const TOOL_VERSION = "5.0.0";
 
 /**
  * Scan a local directory or GitHub repo for malware indicators.
@@ -124,7 +124,7 @@ export async function scan(options: ScanOptions): Promise<ScanReport> {
   for (const filePath of allFiles) {
     const ext = path.extname(filePath).toLowerCase();
     const basename = path.basename(filePath);
-    const relativePath = path.relative(scanDir, filePath);
+    const relativePath = path.relative(scanDir, filePath).replace(/\\/g, "/");
 
     // Check suspicious file names
     checkSuspiciousFileName(basename, relativePath, findings);
@@ -423,7 +423,8 @@ function collectFiles(dir: string, maxDepth: number, depth = 0): string[] {
         entry.name === ".next" ||
         entry.name === "__pycache__" ||
         entry.name === ".venv" ||
-        entry.name === "venv"
+        entry.name === "venv" ||
+        entry.name === ".claude"
       ) {
         continue;
       }
@@ -482,12 +483,19 @@ function checkFilePatterns(
   ];
 
   const fileExt = path.extname(relativePath).toLowerCase();
+  // Normalise path separators for cross-platform regex matching
+  const normalizedPath = relativePath.replace(/\\/g, "/");
+  const isTestFile = /[._-](test|spec|mock|fixture|stub|fake)\.|__tests__|\/tests?\/|conftest\.py/i.test(normalizedPath);
 
   for (const pattern of allPatterns) {
     // Respect onlyExtensions restriction (e.g. SVG_SCRIPT_INJECTION → .svg only)
-    if (pattern.onlyExtensions && !pattern.onlyExtensions.includes(fileExt)) {
-      continue;
-    }
+    if (pattern.onlyExtensions && !pattern.onlyExtensions.includes(fileExt)) continue;
+    // Respect onlyFilePattern (e.g. README_LURE → README/docs files only)
+    if (pattern.onlyFilePattern && !pattern.onlyFilePattern.test(normalizedPath)) continue;
+    // Respect notFilePattern (e.g. skip .min.js for framework-heavy patterns)
+    if (pattern.notFilePattern  && pattern.notFilePattern.test(normalizedPath))  continue;
+    // Skip test/spec/fixture files for patterns marked notTestFile
+    if (pattern.notTestFile     && isTestFile)                                    continue;
 
     const regex = new RegExp(pattern.pattern, "g");
 
@@ -614,7 +622,7 @@ function checkGitDateAnomalies(dir: string, findings: Finding[]): void {
  */
 function checkBinaryFile(relativePath: string, findings: Finding[]): void {
   // Check if the binary belongs to a known native package
-  const parts = relativePath.split(path.sep);
+  const parts = relativePath.split(/[/\\]/);
   const isKnownNative = parts.some((part) => KNOWN_NATIVE_PACKAGES.has(part));
 
   if (isKnownNative) {
@@ -692,8 +700,15 @@ function checkBeaconMinerPatterns(
   findings: Finding[],
 ): void {
   const lines = content.split("\n");
+  const normalizedPath = relativePath.replace(/\\/g, "/");
+  const isTestFile = /[._-](test|spec|mock|fixture|stub|fake)\.|__tests__|\/tests?\/|conftest\.py/i.test(normalizedPath);
 
   for (const pattern of BEACON_MINER_PATTERNS) {
+    // Apply context-aware file filters (same guards as checkFilePatterns)
+    if (pattern.onlyFilePattern && !pattern.onlyFilePattern.test(normalizedPath)) continue;
+    if (pattern.notFilePattern  && pattern.notFilePattern.test(normalizedPath))  continue;
+    if (pattern.notTestFile     && isTestFile)                                    continue;
+
     const regex = new RegExp(pattern.pattern, "gi");
 
     for (let i = 0; i < lines.length; i++) {
@@ -978,10 +993,19 @@ function calculateSummary(
  * Each unique rule contributes at most once (its highest severity instance),
  * preventing repeated instances of the same moderate rule from dominating the score.
  */
+// Meta/governance findings that fire because other findings exist — excluded from
+// score to prevent circular inflation (they don't represent independent risk signals).
+const SCORE_EXCLUDED_RULES = new Set([
+  "CRITICAL_FINDING_NO_OWNER",
+  "RISK_STAGNATION_HIGH",
+]);
+
 function calculateScore(findings: Finding[]): number {
-  // Deduplicate by rule — take the highest-severity instance per rule
+  // Deduplicate by rule — take the highest-severity instance per rule.
+  // Skip meta-governance findings that would circularly inflate the score.
   const maxByRule = new Map<string, Severity>();
   for (const finding of findings) {
+    if (SCORE_EXCLUDED_RULES.has(finding.rule)) continue;
     const current = maxByRule.get(finding.rule);
     if (!current || SEVERITY_SCORES[finding.severity] > SEVERITY_SCORES[current]) {
       maxByRule.set(finding.rule, finding.severity);

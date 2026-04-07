@@ -39,8 +39,8 @@ describe("Infostealer Patterns", () => {
     it("should detect browser credential theft", () => {
       const p = INFOSTEALER_PATTERNS.find((p) => p.rule === "VIDAR_BROWSER_THEFT");
       expect(p).toBeDefined();
-      expect(matchPattern(p!.pattern, 'copy("Login Data", sqlite_path)')).toBe(true);
-      expect(matchPattern(p!.pattern, 'path.join(AppData, "Local", "Google", "Chrome")')).toBe(true);
+      expect(matchPattern(p!.pattern, 'AppData/Local/Google/Chrome/User Data/Default/Login Data')).toBe(true);
+      expect(matchPattern(p!.pattern, 'AppData\\Roaming\\Mozilla\\Firefox\\Profiles\\key4.db')).toBe(true);
     });
 
     it("should detect crypto wallet theft", () => {
@@ -63,8 +63,8 @@ describe("Infostealer Patterns", () => {
     it("should detect backconnect patterns", () => {
       const p = INFOSTEALER_PATTERNS.find((p) => p.rule === "PROXY_BACKCONNECT");
       expect(p).toBeDefined();
-      expect(matchPattern(p!.pattern, "register as residential proxy")).toBe(true);
-      expect(matchPattern(p!.pattern, "backconnect_server")).toBe(true);
+      expect(matchPattern(p!.pattern, "socks5://192.168.1.5:1080 backconnect:9090")).toBe(true);
+      expect(matchPattern(p!.pattern, "back_connect via proxy.checkin")).toBe(true);
     });
   });
 
