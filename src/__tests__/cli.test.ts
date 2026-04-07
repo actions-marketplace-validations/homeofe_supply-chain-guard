@@ -74,20 +74,27 @@ describe("CLI scan – clean fixture", () => {
     expect(status).toBe(0);
   });
 
-  it("should produce JSON output with no findings", () => {
+  it("should produce JSON output with no security findings", () => {
     const { stdout, status } = cli(["scan", CLEAN_FIXTURE, "--format", "json"]);
     expect(status).toBe(0);
-    const parsed = JSON.parse(stdout) as { findings: unknown[]; score: number };
-    expect(parsed.findings).toHaveLength(0);
-    expect(parsed.score).toBe(0);
+    const parsed = JSON.parse(stdout) as { findings: Array<{ rule: string; severity: string }>; score: number };
+    // v4.9: SLSA posture findings (info) may appear for directories without build provenance
+    const securityFindings = parsed.findings.filter((f) => !f.rule.startsWith("SLSA_"));
+    expect(securityFindings).toHaveLength(0);
+    expect(parsed.summary?.critical ?? 0).toBe(0);
+    expect(parsed.summary?.high ?? 0).toBe(0);
   });
 
-  it("should produce valid SARIF output with no results", () => {
+  it("should produce valid SARIF output with no security results", () => {
     const { stdout, status } = cli(["scan", CLEAN_FIXTURE, "--format", "sarif"]);
     expect(status).toBe(0);
-    const parsed = JSON.parse(stdout) as { version: string; runs: Array<{ results: unknown[] }> };
+    const parsed = JSON.parse(stdout) as { version: string; runs: Array<{ results: Array<{ ruleId: string }> }> };
     expect(parsed.version).toBe("2.1.0");
-    expect(parsed.runs[0].results).toHaveLength(0);
+    // v4.9: SLSA posture findings may appear; filter them out
+    const securityResults = (parsed.runs[0].results ?? []).filter(
+      (r) => !r.ruleId.startsWith("SLSA_"),
+    );
+    expect(securityResults).toHaveLength(0);
   });
 
   it("should produce SBOM output with CycloneDX format", () => {
@@ -95,7 +102,7 @@ describe("CLI scan – clean fixture", () => {
     expect(status).toBe(0);
     const parsed = JSON.parse(stdout) as { bomFormat: string; specVersion: string };
     expect(parsed.bomFormat).toBe("CycloneDX");
-    expect(parsed.specVersion).toBe("1.5");
+    expect(parsed.specVersion).toBe("1.6");
   });
 });
 

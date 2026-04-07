@@ -56,10 +56,10 @@ export function modelWorkflows(dir: string): Finding[] {
       if (hasSecretRef && hasNetworkEgress) {
         findings.push({
           rule: "WORKFLOW_SECRET_TO_UPLOAD_PATH",
-          description: `Workflow "${file}" accesses secrets and has network egress. Secrets may be exfiltrated.`,
-          severity: "high",
+          description: `Workflow "${file}" accesses secrets and has network egress. Verify secrets are not sent to external endpoints.`,
+          severity: "medium",
           file: relPath,
-          confidence: 0.7,
+          confidence: 0.6,
           category: "supply-chain",
           recommendation: "Audit this workflow for secret-to-network paths. Minimize secret scoping.",
         });

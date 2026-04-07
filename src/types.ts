@@ -78,6 +78,51 @@ export interface ScanReport {
   riskHistory?: RiskHistoryEntry[];
   /** Security metrics (v4.8) */
   metrics?: SecurityMetrics;
+  /** CycloneDX 1.6 SBOM document generated from dependency inventory (v4.9) */
+  sbomDocument?: SbomDocument;
+  /** SLSA provenance level 0-3 (v4.9) */
+  slsaLevel?: number;
+}
+
+// ---------------------------------------------------------------------------
+// v4.9 SBOM & SLSA types
+// ---------------------------------------------------------------------------
+
+export interface SbomComponent {
+  type: "library" | "application" | "framework";
+  name: string;
+  version: string;
+  /** Package URL (pkg:npm/name@version or pkg:pypi/name@version) */
+  purl: string;
+  hashes?: Array<{ alg: "SHA-256" | "SHA-512" | "SHA-1"; content: string }>;
+  licenses?: string[];
+  scope?: "required" | "optional" | "excluded";
+}
+
+export interface VexStatement {
+  /** CVE or finding ID */
+  id: string;
+  source?: { name: string; url?: string };
+  analysis: {
+    state: "not_affected" | "affected" | "fixed" | "under_investigation";
+    justification?: string;
+    detail?: string;
+  };
+  affects?: Array<{ ref: string; versions?: string[] }>;
+}
+
+export interface SbomDocument {
+  bomFormat: "CycloneDX";
+  specVersion: "1.6";
+  serialNumber: string;
+  version: number;
+  metadata: {
+    timestamp: string;
+    tools: { components: Array<{ type: string; name: string; version: string }> };
+    component: { type: string; name: string; "bom-ref": string };
+  };
+  components: SbomComponent[];
+  vulnerabilities?: VexStatement[];
 }
 
 // ---------------------------------------------------------------------------
@@ -328,6 +373,8 @@ export interface PatternEntry {
   severity: Severity;
   /** Rule ID */
   rule: string;
+  /** If set, only apply this pattern to files with these extensions (e.g. [".svg"]) */
+  onlyExtensions?: string[];
 }
 
 export interface WatchlistEntry {
@@ -389,7 +436,7 @@ export interface TrustBreakdown {
 export const SEVERITY_SCORES: Record<Severity, number> = {
   critical: 25,
   high: 15,
-  medium: 8,
-  low: 3,
+  medium: 5,
+  low: 2,
   info: 1,
 };

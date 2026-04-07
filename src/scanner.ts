@@ -7,7 +7,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { execSync } from "node:child_process";
-import type { Finding, ScanOptions, ScanReport, ScanSummary } from "./types.js";
+import type { Finding, ScanOptions, ScanReport, ScanSummary, Severity } from "./types.js";
 import { SEVERITY_SCORES } from "./types.js";
 import {
   FILE_PATTERNS,
@@ -65,8 +65,11 @@ import {
   OBFUSCATION_V3_PATTERNS,
   PROVENANCE_PATTERNS,
 } from "./patterns.js";
+import { generateSbomDocument } from "./sbom-generator.js";
+import { verifySLSA, getSLSALevel } from "./slsa-verifier.js";
+import { scanPypiDependencyConfusion } from "./dependency-confusion.js";
 
-const TOOL_VERSION = "4.8.0";
+const TOOL_VERSION = "4.9.0";
 
 /**
  * Scan a local directory or GitHub repo for malware indicators.
@@ -241,6 +244,15 @@ export async function scan(options: ScanOptions): Promise<ScanReport> {
   const ghaFindings = scanGitHubActionsWorkflows(scanDir);
   findings.push(...ghaFindings);
 
+  // v4.9: SLSA provenance verification
+  findings.push(...verifySLSA(scanDir));
+
+  // v4.9: PyPI dependency confusion (if requirements.txt / pyproject.toml present)
+  try {
+    const pypiConfusion = await scanPypiDependencyConfusion(scanDir);
+    findings.push(...pypiConfusion);
+  } catch { /* skip if offline */ }
+
   // GitHub trust signal analysis (v4.1)
   if (scanType === "github") {
     const parsed = parseGitHubUrl(target);
@@ -376,6 +388,10 @@ export async function scan(options: ScanOptions): Promise<ScanReport> {
       : undefined,
     riskHistory: riskHistory.length > 0 ? riskHistory : undefined,
     metrics,
+    // v4.9: CycloneDX 1.6 SBOM from actual dependency inventory
+    sbomDocument: generateSbomDocument(scanDir, filteredFindings),
+    // v4.9: SLSA provenance level
+    slsaLevel: getSLSALevel(scanDir),
   };
 }
 
@@ -465,7 +481,14 @@ function checkFilePatterns(
     ...PROVENANCE_PATTERNS,
   ];
 
+  const fileExt = path.extname(relativePath).toLowerCase();
+
   for (const pattern of allPatterns) {
+    // Respect onlyExtensions restriction (e.g. SVG_SCRIPT_INJECTION → .svg only)
+    if (pattern.onlyExtensions && !pattern.onlyExtensions.includes(fileExt)) {
+      continue;
+    }
+
     const regex = new RegExp(pattern.pattern, "g");
 
     for (let i = 0; i < lines.length; i++) {
@@ -952,11 +975,21 @@ function calculateSummary(
 
 /**
  * Calculate overall risk score (0-100).
+ * Each unique rule contributes at most once (its highest severity instance),
+ * preventing repeated instances of the same moderate rule from dominating the score.
  */
 function calculateScore(findings: Finding[]): number {
-  let score = 0;
+  // Deduplicate by rule — take the highest-severity instance per rule
+  const maxByRule = new Map<string, Severity>();
   for (const finding of findings) {
-    score += SEVERITY_SCORES[finding.severity];
+    const current = maxByRule.get(finding.rule);
+    if (!current || SEVERITY_SCORES[finding.severity] > SEVERITY_SCORES[current]) {
+      maxByRule.set(finding.rule, finding.severity);
+    }
+  }
+  let score = 0;
+  for (const severity of maxByRule.values()) {
+    score += SEVERITY_SCORES[severity];
   }
   return Math.min(100, score);
 }

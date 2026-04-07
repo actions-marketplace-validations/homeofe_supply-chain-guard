@@ -324,16 +324,16 @@ interface SbomOutput {
   }>;
 }
 
-describe("formatReport – SBOM (CycloneDX 1.5)", () => {
+describe("formatReport – SBOM (CycloneDX 1.6)", () => {
   it("should produce valid JSON", () => {
     const output = formatReport(makeReport(), "sbom");
     expect(() => JSON.parse(output)).not.toThrow();
   });
 
-  it("should set bomFormat to CycloneDX and specVersion to 1.5", () => {
+  it("should set bomFormat to CycloneDX and specVersion to 1.6", () => {
     const parsed = JSON.parse(formatReport(makeReport(), "sbom")) as SbomOutput;
     expect(parsed.bomFormat).toBe("CycloneDX");
-    expect(parsed.specVersion).toBe("1.5");
+    expect(parsed.specVersion).toBe("1.6");
   });
 
   it("should include a serialNumber as urn:uuid", () => {
@@ -372,10 +372,11 @@ describe("formatReport – SBOM (CycloneDX 1.5)", () => {
     expect(parsed.vulnerabilities).toHaveLength(0);
   });
 
-  it("should include components array with target", () => {
+  it("should include components array (empty in fallback mode, no lockfile)", () => {
+    // In v4.9, components are populated from package-lock.json via sbomDocument.
+    // The fallback SBOM (no sbomDocument on report) has an empty components array.
     const parsed = JSON.parse(formatReport(makeReport(), "sbom")) as SbomOutput;
-    expect(parsed.components.length).toBeGreaterThan(0);
-    expect(parsed.components[0].name).toBe("test-package");
+    expect(Array.isArray(parsed.components)).toBe(true);
   });
 
   it("each vulnerability should reference the target component", () => {

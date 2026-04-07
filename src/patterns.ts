@@ -681,7 +681,7 @@ export const BEACON_MINER_PATTERNS: PatternEntry[] = [
       "setInterval\\s*\\(.*(?:fetch|https?\\.(?:get|request)|axios|got|node-fetch|XMLHttpRequest)",
     description:
       "Periodic network request detected (setInterval + fetch). This is a common beacon pattern for C2 communication.",
-    severity: "high",
+    severity: "medium",
     rule: "BEACON_INTERVAL_FETCH",
   },
   {
@@ -945,10 +945,10 @@ export const OBFUSCATION_PATTERNS_V2: PatternEntry[] = [
   {
     name: "dynamic-import-expression",
     pattern:
-      "import\\s*\\(\\s*(?:`|\\+|process\\.env|String\\.fromCharCode)",
+      "import\\s*\\(\\s*(?:`[^`]*\\$\\{|\\+|process\\.env|String\\.fromCharCode)",
     description:
-      "Dynamic import() with computed URL. Can load modules from attacker-controlled sources.",
-    severity: "high",
+      "Dynamic import() with computed URL (template literal with expression, env variable, or string construction). Can load modules from attacker-controlled sources.",
+    severity: "medium",
     rule: "IMPORT_EXPRESSION",
   },
   {
@@ -977,6 +977,7 @@ export const OBFUSCATION_PATTERNS_V2: PatternEntry[] = [
       "SVG file contains <script> tag or event handler. SVG files can execute JavaScript.",
     severity: "high",
     rule: "SVG_SCRIPT_INJECTION",
+    onlyExtensions: [".svg"],
   },
   {
     name: "rtl-override",
@@ -1071,7 +1072,7 @@ export const INFOSTEALER_PATTERNS: PatternEntry[] = [
       "(?:nslookup|dig)\\s+.*\\bTXT\\b|dns\\.resolveTxt|resolver\\.query.*TXT",
     description:
       "DNS TXT record lookup detected. Malware uses DNS TXT records as covert C2 channels.",
-    severity: "high",
+    severity: "medium",
     rule: "DEAD_DROP_DNS_TXT",
   },
 
@@ -1219,7 +1220,7 @@ export const C2_EXTENDED_PATTERNS: PatternEntry[] = [
       "(?:cloudflare-dns\\.com|dns\\.google|dns\\.quad9\\.net)/dns-query|application/dns-json|application/dns-message",
     description:
       "DNS-over-HTTPS (DoH) resolver in code. Malware uses DoH to resolve C2 domains while bypassing network monitoring.",
-    severity: "high",
+    severity: "medium",
     rule: "C2_DOH_RESOLVER",
   },
   {
@@ -1282,7 +1283,7 @@ export const SECRETS_PATTERNS: PatternEntry[] = [
   {
     name: "secrets-ssh-key-read",
     pattern:
-      "(?:readFile|readFileSync|open|cat|type).*(?:\\.ssh[/\\\\]id_|~[/\\\\]\\.ssh)",
+      "(?:readFile|readFileSync|open|cat|type).*\\.ssh[/\\\\](?:id_rsa|id_ed25519|id_ecdsa|id_dsa|identity)(?:[^a-z]|$)",
     description:
       "Code reads SSH private key files. Infostealers exfiltrate SSH keys for lateral movement.",
     severity: "critical",

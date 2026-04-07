@@ -92,11 +92,11 @@ const WORKFLOW_PATTERNS: Array<{
     rule: "GHA_ATOB_USAGE",
   },
 
-  // Environment variable exfiltration
+  // Environment variable exfiltration — requires secrets/env passed as DATA (not as URL)
   {
-    pattern: "\\benv\\b.*\\bcurl\\b|\\bcurl\\b.*\\benv\\b",
-    description: "Environment variables referenced alongside curl (potential exfiltration)",
-    severity: "medium",
+    pattern: "curl\\b[^'\"\\n]*(?:-d|--data|--data-raw|-H|--header)[^'\"\\n]*\\$\\{\\{\\s*(?:secrets|env)\\.",
+    description: "Secret or env variable passed as curl request data/header (potential exfiltration)",
+    severity: "high",
     rule: "GHA_ENV_EXFIL",
   },
 
@@ -113,7 +113,76 @@ const WORKFLOW_PATTERNS: Array<{
     severity: "medium",
     rule: "GHA_EVAL_STRING",
   },
+
+  // ── 2025 attack patterns (PPE, OIDC theft, cache/artifact poisoning) ──
+
+  // Poisoned Pipeline Execution: pull_request_target + unsanitized PR context in run:
+  {
+    pattern: "\\$\\{\\{\\s*github\\.event\\.pull_request\\.",
+    description:
+      "Unsanitized pull_request event context used in workflow step — potential Poisoned Pipeline Execution (PPE). " +
+      "An attacker-controlled PR can inject arbitrary commands.",
+    severity: "critical",
+    rule: "GHA_PPE_PULL_TARGET",
+  },
+  // Script injection via user-controlled context (issue body, PR title, commit message)
+  {
+    pattern: "\\$\\{\\{\\s*github\\.event\\.(?:issue|pull_request|head_commit|commits?)\\.[^}]*(?:body|title|message|name)\\s*\\}\\}",
+    description:
+      "User-controlled GitHub event data (issue/PR body, commit message) injected directly into a run: step — GitHub Actions Script Injection risk",
+    severity: "critical",
+    rule: "GHA_SCRIPT_INJECTION",
+  },
+  // OIDC token theft: id-token:write permission combined with outbound network call
+  {
+    pattern: "id-token:\\s*write",
+    description:
+      "Workflow requests OIDC id-token:write permission. If combined with unreviewed third-party actions or outbound curl, " +
+      "an attacker can steal the OIDC token to impersonate the workflow's cloud identity.",
+    severity: "medium",
+    rule: "GHA_OIDC_WRITE_PERM",
+  },
+  // Cache poisoning: cache key derived from PR branch (github.head_ref)
+  {
+    pattern: "github\\.head_ref",
+    description:
+      "Cache or artifact key uses github.head_ref (PR branch name). " +
+      "An attacker can create a branch named to match a poisoned cache key and inject malicious cached content.",
+    severity: "high",
+    rule: "GHA_CACHE_POISONING",
+  },
+  // Artifact injection: download-artifact from a PR-triggered workflow used in release/deploy
+  {
+    pattern: "actions/download-artifact",
+    description:
+      "Workflow downloads build artifacts. If artifacts originate from an untrusted PR workflow, " +
+      "they may have been tampered with (artifact injection attack).",
+    severity: "low",
+    rule: "GHA_ARTIFACT_DOWNLOAD",
+  },
+  // Self-modifying workflow: writing to .github/workflows/
+  {
+    pattern: "(?:echo|tee|cat|cp|mv|write).*\\.github[\\\\/]workflows[\\\\/]",
+    description:
+      "Workflow writes to .github/workflows/ — this can persist malicious code by modifying CI pipeline files (supply chain worm pattern)",
+    severity: "critical",
+    rule: "GHA_SELF_MODIFY",
+  },
 ];
+
+/**
+ * Known compromised action commit SHAs.
+ * These SHAs are confirmed malicious and should never be used.
+ * Sources: GitHub Security Advisories, supply chain incident reports.
+ */
+const KNOWN_MALICIOUS_ACTION_SHAS = new Map<string, string>([
+  // tj-actions/changed-files — compromised September 2025 (GHSA-2025-tj-actions)
+  // Exfiltrated CI secrets to attacker-controlled server via public build logs
+  ["d8462b4fc879d893f8f3b49843bde065f3f07b82", "tj-actions/changed-files (Sep 2025 compromise)"],
+  ["0e58ed8671d6b60d0890c21b07f8835ace038e67", "tj-actions/changed-files (Sep 2025 compromise variant)"],
+  // reviewdog/action-setup — compromised as part of tj-actions attack chain
+  ["3f401fe1d58fe77e10d665ab713057369b8cdfe4", "reviewdog/action-setup (Sep 2025 attack chain)"],
+]);
 
 /** Well-known official or trusted GitHub Action owners. */
 const TRUSTED_ACTION_OWNERS = new Set([
@@ -255,6 +324,21 @@ function checkActionReferences(
     const actionPath = actionRef.substring(0, atIndex);
     const ref = actionRef.substring(atIndex + 1);
     const owner = actionPath.split("/")[0] ?? "";
+
+    // Check against known malicious SHAs (highest priority — always critical)
+    if (SHA_PATTERN.test(ref) && KNOWN_MALICIOUS_ACTION_SHAS.has(ref)) {
+      findings.push({
+        rule: "GHA_KNOWN_MALICIOUS_SHA",
+        description: `Action "${actionRef}" references a KNOWN COMPROMISED commit SHA: ${KNOWN_MALICIOUS_ACTION_SHAS.get(ref)}. This SHA is confirmed malicious.`,
+        severity: "critical",
+        file: relativePath,
+        line: i + 1,
+        match: truncateMatch(actionRef),
+        recommendation:
+          "Remove or replace this action immediately. Update to a verified clean version and rotate any secrets " +
+          "that may have been exposed during builds using this action.",
+      });
+    }
 
     // Check for unpinned versions (branch names instead of SHAs or semver tags)
     if (UNPINNED_REF_PATTERN.test(ref)) {
@@ -451,6 +535,27 @@ function getWorkflowRecommendation(rule: string): string {
       "eval with command substitution enables dynamic code execution. This is rarely needed in CI workflows.",
     GHA_EVAL_STRING:
       "eval of string content in workflows can execute injected code. Prefer direct commands.",
+    GHA_PPE_PULL_TARGET:
+      "Avoid using pull_request_target with checkout of PR code or PR context in run steps. " +
+      "Use pull_request trigger instead, or sanitize all PR context values before use.",
+    GHA_SCRIPT_INJECTION:
+      "Never interpolate user-controlled GitHub context (issue body, PR title, commit message) directly into run: steps. " +
+      "Store the value in an environment variable first: env: VALUE: ${{ github.event.issue.body }} then use $VALUE.",
+    GHA_OIDC_WRITE_PERM:
+      "Audit all steps in this workflow when id-token:write is set. Ensure no third-party action or run step " +
+      "can exfiltrate the OIDC token. Scope permissions as narrowly as possible.",
+    GHA_CACHE_POISONING:
+      "Do not use github.head_ref in cache keys for workflows that can be triggered by untrusted PRs. " +
+      "Use github.sha or a hash of locked dependency files instead.",
+    GHA_ARTIFACT_DOWNLOAD:
+      "Verify that downloaded artifacts originate only from trusted, protected workflows. " +
+      "Consider adding artifact attestation using actions/attest-build-provenance.",
+    GHA_SELF_MODIFY:
+      "Workflows must not modify their own or other workflow files. This pattern is used by supply chain worms " +
+      "to persist malicious code. Investigate immediately and audit recent workflow file changes.",
+    GHA_KNOWN_MALICIOUS_SHA:
+      "Replace this action immediately and rotate all secrets accessible during builds that used this action. " +
+      "File a security incident report and review all build logs for exfiltrated data.",
   };
   return map[rule] ?? "Review this finding and assess whether it represents legitimate CI/CD functionality.";
 }

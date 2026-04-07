@@ -20,10 +20,18 @@ describe("Core Scanner", () => {
       format: "text",
     });
 
-    expect(report.score).toBe(0);
-    expect(report.riskLevel).toBe("clean");
-    expect(report.findings).toHaveLength(0);
+    // v4.9: SLSA_LEVEL_0 (info severity, score=1) is emitted for directories
+    // without any build scripts — this is a posture finding, not a security alert.
+    // Verify no actual security/malware findings are present.
+    const securityFindings = report.findings.filter(
+      (f) => !f.rule.startsWith("SLSA_"),
+    );
+    expect(securityFindings).toHaveLength(0);
     expect(report.scanType).toBe("directory");
+    expect(report.summary.critical).toBe(0);
+    expect(report.summary.high).toBe(0);
+    expect(report.summary.medium).toBe(0);
+    expect(report.summary.low).toBe(0);
   });
 
   it("should detect GlassWorm marker variable", async () => {

@@ -7,7 +7,7 @@
 
 import type { Finding } from "./types.js";
 
-/** Top 80 most popular npm packages (targets for typosquatting) */
+/** Top popular npm packages (targets for typosquatting) */
 const POPULAR_PACKAGES: string[] = [
   "lodash", "chalk", "express", "react", "axios", "commander", "debug",
   "glob", "minimist", "semver", "uuid", "mkdirp", "rimraf", "yargs",
@@ -16,14 +16,19 @@ const POPULAR_PACKAGES: string[] = [
   "eslint", "prettier", "jest", "mocha", "chai", "sinon", "supertest",
   "mongoose", "sequelize", "pg", "mysql2", "redis", "ioredis",
   "socket.io", "cors", "helmet", "morgan", "cookie-parser", "jsonwebtoken",
-  "bcrypt", "passport", "nodemailer", "multer", "sharp", "puppeteer",
+  "bcrypt", "bcryptjs", "passport", "nodemailer", "multer", "sharp", "puppeteer",
   "cheerio", "node-fetch", "got", "superagent", "http-proxy-middleware",
   "ws", "next", "gatsby", "vue", "angular", "svelte", "tailwindcss",
   "postcss", "autoprefixer", "sass", "less", "babel", "esbuild",
   "rollup", "vite", "turbo", "nx", "lerna", "husky", "lint-staged",
   "cross-env", "concurrently", "nodemon", "pm2", "fastify", "koa",
   "hapi", "restify",
+  // Very common packages that are legitimately close in name to other popular ones
+  "swr", "tsx", "zod", "trpc", "drizzle", "prisma", "vitest",
 ];
+
+/** Packages that are known-safe even when close in name to popular packages */
+const POPULAR_PACKAGES_SET = new Set(POPULAR_PACKAGES);
 
 /** Patterns that suggest internal/private package names */
 const INTERNAL_PATTERNS = [
@@ -96,23 +101,29 @@ export function analyzeDependencyRisks(
       continue;
     }
 
-    // Levenshtein check against popular packages
-    for (const popular of POPULAR_PACKAGES) {
-      if (name === popular) continue; // Exact match = legitimate
-      if (Math.abs(name.length - popular.length) > 2) continue; // Quick skip
+    // Levenshtein check against popular packages.
+    // Skip if the name is itself a known popular/safe package — prevents false positives
+    // where two legitimate popular packages happen to be close in name (e.g. next/jest).
+    if (!POPULAR_PACKAGES_SET.has(name) && name.length >= 4) {
+      for (const popular of POPULAR_PACKAGES) {
+        if (name === popular) continue; // Exact match = legitimate
+        // Skip very short popular packages (ws, pg, nx…) — too many false positives
+        if (popular.length < 4) continue;
+        if (Math.abs(name.length - popular.length) > 2) continue; // Quick skip
 
-      const dist = levenshtein(name, popular);
-      if (dist > 0 && dist <= 2) {
-        findings.push({
-          rule: "TYPOSQUAT_LEVENSHTEIN",
-          description: `Dependency "${name}" is ${dist} edit(s) away from popular package "${popular}". Likely a typosquat.`,
-          severity: "high",
-          file: relativePath,
-          confidence: dist === 1 ? 0.85 : 0.65,
-          category: "supply-chain",
-          recommendation: `Did you mean "${popular}"? Typosquatting replaces popular packages with malicious copies.`,
-        });
-        break; // One match per dep is enough
+        const dist = levenshtein(name, popular);
+        if (dist > 0 && dist <= 2) {
+          findings.push({
+            rule: "TYPOSQUAT_LEVENSHTEIN",
+            description: `Dependency "${name}" is ${dist} edit(s) away from popular package "${popular}". Likely a typosquat.`,
+            severity: "high",
+            file: relativePath,
+            confidence: dist === 1 ? 0.85 : 0.65,
+            category: "supply-chain",
+            recommendation: `Did you mean "${popular}"? Typosquatting replaces popular packages with malicious copies.`,
+          });
+          break; // One match per dep is enough
+        }
       }
     }
 

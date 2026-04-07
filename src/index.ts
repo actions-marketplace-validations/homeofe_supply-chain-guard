@@ -58,6 +58,9 @@ export { loadTriageDecisions, saveTriageDecisions, checkTriageGovernance } from 
 export { checkSlaCompliance } from "./sla-engine.js";
 export { forecastRisk } from "./risk-forecast.js";
 export { calculateMetrics } from "./metrics.js";
+export { generateSbomDocument } from "./sbom-generator.js";
+export { verifySLSA, getSLSALevel } from "./slsa-verifier.js";
+export { scanPypiDependencyConfusion } from "./dependency-confusion.js";
 export type {
   Finding,
   ScanReport,
@@ -71,4 +74,7 @@ export type {
   WatchlistEntry,
   WatchlistConfig,
   WatchlistAlert,
+  SbomDocument,
+  SbomComponent,
+  VexStatement,
 } from "./types.js";

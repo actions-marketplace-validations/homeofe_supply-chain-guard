@@ -87,6 +87,13 @@ function formatText(report: ScanReport): string {
   lines.push(
     `  Risk Score: ${scoreColor}${BOLD}${report.score}/100${RESET} (${report.riskLevel.toUpperCase()})`,
   );
+  if (report.slsaLevel !== undefined) {
+    const slsaColor = report.slsaLevel >= 3 ? "\x1b[32m" : report.slsaLevel === 2 ? "\x1b[36m" : report.slsaLevel === 1 ? "\x1b[33m" : "\x1b[31m";
+    lines.push(`  SLSA Level:  ${slsaColor}${BOLD}${report.slsaLevel}/3${RESET}`);
+  }
+  if (report.sbomDocument) {
+    lines.push(`  SBOM:        ${DIM}CycloneDX 1.6 — ${report.sbomDocument.components.length} component(s)${RESET}`);
+  }
   lines.push("");
 
   // Summary
@@ -429,23 +436,45 @@ function severityRank(severity: Severity): number {
 }
 
 /**
- * Format as CycloneDX 1.5 JSON SBOM.
+ * Format as CycloneDX 1.6 JSON SBOM.
+ * Uses the sbomDocument generated from actual package.json/lockfile if available,
+ * otherwise falls back to a findings-based SBOM.
  */
 function formatSbom(report: ScanReport): string {
+  // v4.9: use the proper CycloneDX 1.6 document if available
+  if (report.sbomDocument) {
+    // Attach scan findings as vulnerabilities to the real SBOM
+    const withVulns = {
+      ...report.sbomDocument,
+      vulnerabilities: [
+        ...(report.sbomDocument.vulnerabilities ?? []),
+        ...report.findings
+          .filter((f) => !f.suppressed)
+          .map((finding, idx) => ({
+            "bom-ref": `scg-finding-${idx}`,
+            id: finding.rule,
+            source: { name: "supply-chain-guard" },
+            ratings: [{ severity: finding.severity, method: "other" }],
+            description: finding.description,
+            recommendation: finding.recommendation,
+            affects: finding.file ? [{ ref: finding.file }] : [{ ref: "target" }],
+          })),
+      ],
+    };
+    return JSON.stringify(withVulns, null, 2);
+  }
+
+  // Fallback: findings-based SBOM (legacy, no lockfile present)
   const sbom = {
     bomFormat: "CycloneDX",
-    specVersion: "1.5",
+    specVersion: "1.6",
     serialNumber: `urn:uuid:${randomUUID()}`,
     version: 1,
     metadata: {
       timestamp: report.timestamp,
       tools: {
         components: [
-          {
-            type: "application",
-            name: "supply-chain-guard",
-            version: "4.8.0",
-          },
+          { type: "application", name: "supply-chain-guard", version: "4.9.0" },
         ],
       },
       component: {
@@ -454,23 +483,12 @@ function formatSbom(report: ScanReport): string {
         "bom-ref": "target",
       },
     },
-    components: [
-      {
-        type: "application",
-        "bom-ref": "target",
-        name: report.target,
-      },
-    ],
+    components: [] as unknown[],
     vulnerabilities: report.findings.map((finding, idx) => ({
       "bom-ref": `vuln-${idx}`,
       id: finding.rule,
       source: { name: "supply-chain-guard" },
-      ratings: [
-        {
-          severity: finding.severity,
-          method: "other",
-        },
-      ],
+      ratings: [{ severity: finding.severity, method: "other" }],
       description: finding.description,
       recommendation: finding.recommendation,
       affects: [{ ref: "target" }],

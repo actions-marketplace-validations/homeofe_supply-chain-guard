@@ -17,11 +17,60 @@ import { SEVERITY_SCORES } from "./types.js";
 const TOOL_VERSION = "1.0.0";
 const NPM_REGISTRY = "https://registry.npmjs.org";
 const NPM_DOWNLOADS_API = "https://api.npmjs.org/downloads/point/last-week";
+const PYPI_REGISTRY = "https://pypi.org/pypi";
 
 // Heuristic thresholds
 const LOW_DOWNLOAD_THRESHOLD = 100;        // weekly downloads
 const RECENT_PUBLISH_DAYS = 90;            // published within last N days
 const VERY_RECENT_PUBLISH_DAYS = 30;       // very recently published
+/** Version published within this many days is flagged as suspiciously fresh */
+const VERSION_COOLDOWN_DAYS = 7;
+/** Version published within 24h is flagged as critically fresh */
+const VERSION_HOT_HOURS = 24;
+
+/**
+ * Known AI-hallucinated npm package names (LLMs frequently suggest these non-existent packages).
+ * If any of these appear on the public registry, it may indicate a squatting/confusion attack
+ * exploiting AI-generated dependency recommendations.
+ */
+const AI_HALLUCINATED_NPM_PACKAGES = new Set([
+  "express-validator-middleware",
+  "react-use-fetch",
+  "node-auth-helper",
+  "jest-mock-utils",
+  "typescript-utils",
+  "react-form-validator",
+  "node-logger-pro",
+  "express-jwt-helper",
+  "mongoose-utils",
+  "webpack-config-helper",
+  "babel-preset-node",
+  "eslint-config-node",
+  "react-hooks-helper",
+  "node-crypto-utils",
+  "express-error-handler",
+  "jwt-node",
+  "node-mailer-helper",
+  "sequelize-helper",
+  "redis-node-client",
+  "socket-io-helper",
+]);
+
+/**
+ * Known AI-hallucinated PyPI package names.
+ */
+const AI_HALLUCINATED_PYPI_PACKAGES = new Set([
+  "python-utils-helper",
+  "django-api-utils",
+  "flask-auth-helper",
+  "fastapi-utils",
+  "sqlalchemy-helper",
+  "pytest-mock-utils",
+  "pydantic-utils",
+  "python-jwt-helper",
+  "celery-utils",
+  "redis-python-client",
+]);
 
 // Patterns that suggest internal/private package names
 const INTERNAL_NAME_PATTERNS: RegExp[] = [
@@ -225,6 +274,31 @@ async function checkDependency(
 
     // Apply heuristics
 
+    // 0. AI-hallucinated package name
+    if (AI_HALLUCINATED_NPM_PACKAGES.has(name)) {
+      result.flags.push("ai-hallucinated-name");
+    }
+
+    // 0b. Scope-confusion: scoped package that exists on public npm (potential @org squatting)
+    if (isScoped) {
+      result.flags.push("scoped-public-npm");
+    }
+
+    // 0c. Version-specific cooldown: the version used was published < 7 days ago
+    const usedVersion = version.replace(/^[^0-9]*/, "");
+    const versionPublished = usedVersion && registryInfo.time
+      ? registryInfo.time[usedVersion]
+      : undefined;
+    if (versionPublished) {
+      const hoursAgo = (Date.now() - new Date(versionPublished).getTime()) / (1000 * 60 * 60);
+      const daysAgo = hoursAgo / 24;
+      if (hoursAgo < VERSION_HOT_HOURS) {
+        result.flags.push("version-hot-publish");
+      } else if (daysAgo < VERSION_COOLDOWN_DAYS) {
+        result.flags.push("version-cooldown");
+      }
+    }
+
     // 1. Check for internal-looking name pattern (unscoped only)
     if (!isScoped) {
       const looksInternal = INTERNAL_NAME_PATTERNS.some((p) => p.test(name));
@@ -308,6 +382,18 @@ function calculateSeverity(flags: string[], isScoped: boolean): Severity {
   const hasNoRepo = flags.includes("no-repository");
   const isVeryRecent = flags.includes("very-recently-published");
   const hasFewVersions = flags.includes("few-versions");
+  const isHallucinated = flags.includes("ai-hallucinated-name");
+  const isVersionHot = flags.includes("version-hot-publish");
+  const isVersionCooldown = flags.includes("version-cooldown");
+
+  // Critical: AI-hallucinated package name that exists on registry
+  if (isHallucinated) return "high";
+
+  // High: version published within last hour
+  if (isVersionHot) return "high";
+
+  // Medium: version in cooldown window
+  if (isVersionCooldown) return "medium";
 
   // Critical: internal name + recent publish + low downloads (classic confusion attack)
   if (hasInternalName && isVeryRecent && hasLowDownloads) {
@@ -342,6 +428,15 @@ function determineRule(result: DependencyResult): string {
   if (result.flags.includes("not-on-public-registry")) {
     return "DEPCONF_NOT_ON_REGISTRY";
   }
+  if (result.flags.includes("ai-hallucinated-name")) {
+    return "DEP_HALLUCINATED_PACKAGE";
+  }
+  if (result.flags.includes("version-hot-publish") || result.flags.includes("version-cooldown")) {
+    return "DEP_FRESH_PUBLISH";
+  }
+  if (result.flags.includes("scoped-public-npm") && result.flags.includes("no-readme")) {
+    return "DEP_SCOPED_PUBLIC";
+  }
   if (result.flags.includes("internal-name-pattern")) {
     if (result.flags.includes("very-recently-published") || result.flags.includes("low-downloads")) {
       return "DEPCONF_LIKELY_CONFUSION";
@@ -369,6 +464,22 @@ function buildDescription(result: DependencyResult): string {
 
   if (result.flags.includes("scoped-not-on-registry")) {
     return `Scoped package "${result.name}" is not found on the public npm registry. Likely a private/internal package.`;
+  }
+
+  if (result.flags.includes("ai-hallucinated-name")) {
+    return `Package "${result.name}" matches a known AI-hallucinated package name. LLMs frequently suggest this non-existent package, making it a prime target for squatting attacks.`;
+  }
+
+  if (result.flags.includes("version-hot-publish")) {
+    return `Version of "${result.name}" used in this project was published to npm less than ${VERSION_HOT_HOURS} hours ago. This is within the critical window where supply chain attacks are most likely to succeed before detection.`;
+  }
+
+  if (result.flags.includes("version-cooldown")) {
+    return `Version of "${result.name}" used in this project was published to npm less than ${VERSION_COOLDOWN_DAYS} days ago. Security vendors typically need 7 days to detect malicious packages — using brand-new versions carries elevated risk.`;
+  }
+
+  if (result.flags.includes("scoped-public-npm") && result.flags.includes("no-readme")) {
+    return `Scoped package "${result.name}" exists on the public npm registry with no README. If this is your organization's private package, it has been squatted on the public registry.`;
   }
 
   parts.push(`Package "${result.name}" has suspicious characteristics:`);
@@ -596,4 +707,195 @@ function buildReport(
     riskLevel,
     recommendations,
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PyPI Confusion Detection (v4.9)
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface PypiInfo {
+  info?: {
+    name?: string;
+    summary?: string;
+    home_page?: string;
+    project_url?: string;
+    version?: string;
+    author?: string;
+  };
+  releases?: Record<string, unknown[]>;
+  urls?: Array<{ upload_time?: string }>;
+}
+
+/**
+ * Fetch package metadata from PyPI.
+ */
+async function fetchPypiInfo(packageName: string): Promise<PypiInfo> {
+  const url = `${PYPI_REGISTRY}/${encodeURIComponent(packageName)}/json`;
+
+  return new Promise((resolve, reject) => {
+    https
+      .get(
+        url,
+        { headers: { Accept: "application/json", "User-Agent": "supply-chain-guard/4.9.0" } },
+        (res) => {
+          if (res.statusCode === 404) {
+            reject(new Error(`PyPI package not found: ${packageName}`));
+            return;
+          }
+          if (res.statusCode !== 200) {
+            reject(new Error(`PyPI returned status ${res.statusCode}`));
+            return;
+          }
+          let data = "";
+          res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
+          res.on("end", () => {
+            try { resolve(JSON.parse(data) as PypiInfo); }
+            catch { reject(new Error("Failed to parse PyPI response")); }
+          });
+        },
+      )
+      .on("error", reject);
+  });
+}
+
+/**
+ * Parse requirements.txt lines into package names.
+ * Handles: name, name==1.0, name>=1.0, name[extra], # comments
+ */
+function parseRequirementsTxt(content: string): string[] {
+  const names: string[] = [];
+  for (const rawLine of content.split("\n")) {
+    const line = rawLine.split("#")[0]?.trim() ?? "";
+    if (!line || line.startsWith("-") || line.startsWith("http")) continue;
+    // Strip extras, version constraints, environment markers
+    const name = line.split(/[=<>!\[;]/)[0]?.trim();
+    if (name) names.push(name);
+  }
+  return names;
+}
+
+/**
+ * Parse pyproject.toml [project] dependencies section (basic, no TOML parser).
+ */
+function parsePyprojectToml(content: string): string[] {
+  const names: string[] = [];
+  let inDeps = false;
+  for (const rawLine of content.split("\n")) {
+    const line = rawLine.trim();
+    if (line === "[project.dependencies]" || line === 'dependencies = [') {
+      inDeps = true;
+      continue;
+    }
+    if (inDeps && line.startsWith("[") && !line.startsWith("[project")) {
+      inDeps = false;
+    }
+    if (inDeps) {
+      // Match lines like: "name>=1.0", 'name', "name[extra]"
+      const match = /["']?([A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?)["']?\s*[=<>!\[,]?/.exec(line);
+      if (match?.[1]) names.push(match[1]);
+    }
+  }
+  return names;
+}
+
+/**
+ * Scan a project directory for PyPI dependency confusion risks.
+ * Reads requirements.txt and pyproject.toml.
+ */
+export async function scanPypiDependencyConfusion(projectDir: string): Promise<Finding[]> {
+  const findings: Finding[] = [];
+  const packageNames: string[] = [];
+
+  // Collect from requirements.txt
+  const reqTxt = path.join(projectDir, "requirements.txt");
+  if (fs.existsSync(reqTxt)) {
+    try {
+      parseRequirementsTxt(fs.readFileSync(reqTxt, "utf-8")).forEach((n) => packageNames.push(n));
+    } catch { /* skip */ }
+  }
+
+  // Collect from pyproject.toml
+  const pyproject = path.join(projectDir, "pyproject.toml");
+  if (fs.existsSync(pyproject)) {
+    try {
+      parsePyprojectToml(fs.readFileSync(pyproject, "utf-8")).forEach((n) => packageNames.push(n));
+    } catch { /* skip */ }
+  }
+
+  const seen = new Set<string>();
+  for (const name of packageNames) {
+    if (seen.has(name.toLowerCase())) continue;
+    seen.add(name.toLowerCase());
+
+    // AI-hallucinated PyPI package
+    if (AI_HALLUCINATED_PYPI_PACKAGES.has(name.toLowerCase())) {
+      findings.push({
+        rule: "DEP_HALLUCINATED_PACKAGE",
+        description: `PyPI package "${name}" matches a known AI-hallucinated package name. LLMs frequently suggest this non-existent package — it may be squatted on PyPI.`,
+        severity: "high",
+        file: fs.existsSync(reqTxt) ? "requirements.txt" : "pyproject.toml",
+        match: name,
+        recommendation:
+          "Verify this is the correct package. AI-suggested package names that don't exist are frequently registered by attackers.",
+      });
+      continue;
+    }
+
+    // Internal name pattern
+    const looksInternal = INTERNAL_NAME_PATTERNS.some((p) => p.test(name));
+
+    try {
+      const info = await fetchPypiInfo(name);
+      const hasDescription = !!info.info?.summary && info.info.summary.length > 10;
+      const hasHomePage = !!(info.info?.home_page || info.info?.project_url);
+      const releaseCount = info.releases ? Object.keys(info.releases).length : 0;
+      const latestUpload = info.urls?.[0]?.upload_time;
+
+      const flags: string[] = [];
+      if (!hasDescription) flags.push("no-description");
+      if (!hasHomePage) flags.push("no-homepage");
+      if (releaseCount <= 2) flags.push("few-releases");
+      if (looksInternal) flags.push("internal-name-pattern");
+
+      if (latestUpload) {
+        const hoursAgo = (Date.now() - new Date(latestUpload).getTime()) / (1000 * 60 * 60);
+        if (hoursAgo < VERSION_HOT_HOURS) flags.push("version-hot-publish");
+        else if (hoursAgo / 24 < VERSION_COOLDOWN_DAYS) flags.push("version-cooldown");
+      }
+
+      if (flags.length >= 2 || (looksInternal && flags.length >= 1)) {
+        const severity: Severity =
+          looksInternal && flags.includes("version-hot-publish")
+            ? "critical"
+            : looksInternal && flags.length >= 2
+              ? "high"
+              : flags.includes("version-hot-publish")
+                ? "high"
+                : "medium";
+
+        findings.push({
+          rule: "DEP_PYPI_CONFUSION",
+          description: `PyPI package "${name}" has suspicious characteristics: ${flags.join(", ")}`,
+          severity,
+          file: fs.existsSync(reqTxt) ? "requirements.txt" : "pyproject.toml",
+          match: name,
+          recommendation: `Verify "${name}" is the legitimate package. Check https://pypi.org/project/${name}/ and compare with your expected dependency.`,
+        });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("not found") && looksInternal) {
+        findings.push({
+          rule: "DEPCONF_NOT_ON_REGISTRY",
+          description: `PyPI package "${name}" with internal-looking name is not found on PyPI. Private package vulnerable to dependency confusion.`,
+          severity: "high",
+          file: fs.existsSync(reqTxt) ? "requirements.txt" : "pyproject.toml",
+          match: name,
+          recommendation: `Ensure "${name}" is always resolved from your private registry. Configure pip with --index-url pointing to your private registry.`,
+        });
+      }
+    }
+  }
+
+  return findings;
 }

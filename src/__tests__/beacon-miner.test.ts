@@ -28,7 +28,7 @@ describe("Network Beacon and Crypto Miner Detection (T-008)", () => {
         (f) => f.rule === "BEACON_INTERVAL_FETCH",
       );
       expect(finding).toBeDefined();
-      expect(finding!.severity).toBe("high");
+      expect(finding!.severity).toBe("medium");
     });
 
     it("should detect setInterval + https.get beacon pattern", async () => {

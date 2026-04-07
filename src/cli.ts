@@ -61,6 +61,7 @@ program
   .option("--export-incident-md", "Export incident report as markdown to stdout")
   .option("--export-fixes", "Show fix suggestions for automatable findings")
   .option("--export-graph <format>", "Export attack graph (json or mermaid)")
+  .option("--sbom-output <file>", "Write CycloneDX 1.6 SBOM to a separate file")
   .action(
     async (
       target: string,
@@ -76,6 +77,7 @@ program
         exportIncidentMd?: boolean;
         exportFixes?: boolean;
         exportGraph?: string;
+        sbomOutput?: string;
       },
     ) => {
       try {
@@ -114,6 +116,13 @@ program
           } else {
             console.log(JSON.stringify(report.attackGraph, null, 2));
           }
+        }
+
+        // Write SBOM to separate file if requested
+        if (opts.sbomOutput && report.sbomDocument) {
+          const { writeFileSync } = await import("node:fs");
+          writeFileSync(opts.sbomOutput, JSON.stringify(report.sbomDocument, null, 2), "utf-8");
+          console.error(`SBOM written to ${opts.sbomOutput} (CycloneDX 1.6, ${report.sbomDocument.components.length} components)`);
         }
 
         // Show fix suggestions if requested

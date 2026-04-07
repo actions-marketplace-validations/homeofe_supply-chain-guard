@@ -344,6 +344,7 @@ function checkOrphanedDependencies(
 
   // Check v2 packages format
   if (lockfile.packages) {
+    const orphaned: string[] = [];
     for (const pkgPath of Object.keys(lockfile.packages)) {
       // Only check direct dependencies (one level under node_modules)
       const match = pkgPath.match(/^node_modules\/(@[^/]+\/[^/]+|[^@/][^/]*)$/);
@@ -351,17 +352,22 @@ function checkOrphanedDependencies(
 
       const pkgName = match[1]!;
       if (!declared.has(pkgName)) {
-        // Check if it could be a transitive dependency (don't flag those)
-        // We only flag if the package isn't a dependency of any declared package
-        // For now, we use a lighter heuristic: flag with info severity
-        findings.push({
-          rule: "LOCKFILE_ORPHANED_DEPENDENCY",
-          description: `Package "${pkgName}" appears in lockfile but is not declared in package.json. It may be an orphaned dependency from a removed package.`,
-          severity: "info",
-          file: "package-lock.json",
-          recommendation: `Run \`npm prune\` to clean orphaned packages, then regenerate the lockfile.`,
-        });
+        orphaned.push(pkgName);
       }
+    }
+    // Emit a single aggregated finding instead of one per package.
+    // Modern npm v7+ lockfiles contain ALL transitive deps at the root level,
+    // so individual findings would flood results for any non-trivial project.
+    if (orphaned.length > 0) {
+      const examples = orphaned.slice(0, 5).join(", ");
+      const suffix = orphaned.length > 5 ? ` and ${orphaned.length - 5} more` : "";
+      findings.push({
+        rule: "LOCKFILE_ORPHANED_DEPENDENCY",
+        description: `${orphaned.length} package(s) in lockfile are not declared in package.json (likely transitive deps): ${examples}${suffix}.`,
+        severity: "info",
+        file: "package-lock.json",
+        recommendation: `Run \`npm prune\` to clean orphaned packages, then regenerate the lockfile.`,
+      });
     }
   }
 }

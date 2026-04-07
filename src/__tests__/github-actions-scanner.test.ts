@@ -470,3 +470,150 @@ jobs:
     expect(findings.some((f) => f.rule === "GHA_THIRD_PARTY_ACTION")).toBe(true);
   });
 });
+
+// ─── v4.9 new pattern tests ────────────────────────────────────────────────
+
+function writeWorkflow(baseDir: string, name: string, content: string) {
+  const workflowDir = path.join(baseDir, ".github", "workflows");
+  fs.mkdirSync(workflowDir, { recursive: true });
+  fs.writeFileSync(path.join(workflowDir, name), content);
+}
+
+describe("GHA PPE / Script Injection (v4.9)", () => {
+  let tempDir: string;
+  beforeEach(() => { tempDir = fs.mkdtempSync(path.join("/tmp", "scg-gha-v49-")); });
+  afterEach(() => { fs.rmSync(tempDir, { recursive: true, force: true }); });
+
+  it("should detect pull_request_target context usage (PPE)", () => {
+    // Use regular strings to avoid ${{ being mis-parsed as template literal expression
+    const content = [
+      "on: pull_request_target",
+      "jobs:",
+      "  build:",
+      "    runs-on: ubuntu-latest",
+      "    steps:",
+      "      - run: echo ${{ github.event.pull_request.head.sha }}",
+    ].join("\n");
+    writeWorkflow(tempDir, "ppe.yml", content);
+    const findings = scanGitHubActionsWorkflows(tempDir);
+    expect(findings.some((f) => f.rule === "GHA_PPE_PULL_TARGET")).toBe(true);
+    expect(findings.find((f) => f.rule === "GHA_PPE_PULL_TARGET")?.severity).toBe("critical");
+  });
+
+  it("should detect script injection via issue body", () => {
+    const content = [
+      "on: issues",
+      "jobs:",
+      "  process:",
+      "    runs-on: ubuntu-latest",
+      "    steps:",
+      '      - run: echo "${{ github.event.issue.body }}"',
+    ].join("\n");
+    writeWorkflow(tempDir, "inject.yml", content);
+    const findings = scanGitHubActionsWorkflows(tempDir);
+    expect(findings.some((f) => f.rule === "GHA_SCRIPT_INJECTION")).toBe(true);
+    expect(findings.find((f) => f.rule === "GHA_SCRIPT_INJECTION")?.severity).toBe("critical");
+  });
+
+  it("should detect script injection via PR title", () => {
+    const content = [
+      "on: pull_request",
+      "jobs:",
+      "  process:",
+      "    runs-on: ubuntu-latest",
+      "    steps:",
+      '      - run: echo "${{ github.event.pull_request.title }}"',
+    ].join("\n");
+    writeWorkflow(tempDir, "inject.yml", content);
+    const findings = scanGitHubActionsWorkflows(tempDir);
+    expect(findings.some((f) => f.rule === "GHA_SCRIPT_INJECTION")).toBe(true);
+  });
+
+  it("should detect OIDC id-token write permission", () => {
+    writeWorkflow(tempDir, "oidc.yml", `
+on: push
+permissions:
+  id-token: write
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo deploying
+`);
+    const findings = scanGitHubActionsWorkflows(tempDir);
+    expect(findings.some((f) => f.rule === "GHA_OIDC_WRITE_PERM")).toBe(true);
+    expect(findings.find((f) => f.rule === "GHA_OIDC_WRITE_PERM")?.severity).toBe("medium");
+  });
+
+  it("should detect cache poisoning via github.head_ref", () => {
+    writeWorkflow(tempDir, "cache.yml", `
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/cache@v3
+        with:
+          key: runner.os-github.head_ref-node-modules
+`);
+    const findings = scanGitHubActionsWorkflows(tempDir);
+    expect(findings.some((f) => f.rule === "GHA_CACHE_POISONING")).toBe(true);
+    expect(findings.find((f) => f.rule === "GHA_CACHE_POISONING")?.severity).toBe("high");
+  });
+
+  it("should detect self-modifying workflow", () => {
+    writeWorkflow(tempDir, "worm.yml", `
+on: push
+jobs:
+  persist:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "malicious" > .github/workflows/injected.yml
+`);
+    const findings = scanGitHubActionsWorkflows(tempDir);
+    expect(findings.some((f) => f.rule === "GHA_SELF_MODIFY")).toBe(true);
+    expect(findings.find((f) => f.rule === "GHA_SELF_MODIFY")?.severity).toBe("critical");
+  });
+
+  it("should detect known malicious action SHA (tj-actions compromise)", () => {
+    writeWorkflow(tempDir, "ci.yml", `
+on: push
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: tj-actions/changed-files@d8462b4fc879d893f8f3b49843bde065f3f07b82
+`);
+    const findings = scanGitHubActionsWorkflows(tempDir);
+    expect(findings.some((f) => f.rule === "GHA_KNOWN_MALICIOUS_SHA")).toBe(true);
+    expect(findings.find((f) => f.rule === "GHA_KNOWN_MALICIOUS_SHA")?.severity).toBe("critical");
+  });
+
+  it("should not flag legitimate SHA-pinned action", () => {
+    writeWorkflow(tempDir, "ci.yml", `
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+`);
+    const findings = scanGitHubActionsWorkflows(tempDir);
+    expect(findings.some((f) => f.rule === "GHA_KNOWN_MALICIOUS_SHA")).toBe(false);
+  });
+
+  it("should detect artifact download warning", () => {
+    writeWorkflow(tempDir, "deploy.yml", `
+on: push
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v3
+        with:
+          name: build-output
+`);
+    const findings = scanGitHubActionsWorkflows(tempDir);
+    expect(findings.some((f) => f.rule === "GHA_ARTIFACT_DOWNLOAD")).toBe(true);
+  });
+});
