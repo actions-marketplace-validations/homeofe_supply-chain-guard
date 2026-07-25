@@ -33,6 +33,36 @@ export { scanGitHubActionsWorkflows } from "./github-actions-scanner.js";
 export { scanDockerFiles, scanDockerFile } from "./dockerfile-scanner.js";
 export { scanConfigFiles, scanConfigFile } from "./config-scanner.js";
 export { scanGitSecurity } from "./git-scanner.js";
+export {
+  scanInternalDisclosure,
+  loadInternalDisclosureConfig,
+  emptyInternalDisclosureRuntime,
+  hashInternalTerm,
+  normalizeInternalTerm,
+  candidateTokens,
+  isDocumentationFile,
+  classifyFileSurface,
+  isRuleArmedOnSurface,
+  classifyIPv4,
+  isPrivateAddressLeak,
+  isUniqueLocalIPv6,
+  isWellKnownInfraValue,
+  isInternalHost,
+  isSingleLabelHost,
+  severityForHost,
+  isNonPublicForgeHost,
+  isPersonalAccountName,
+  isDevPathContextOk,
+  isHostnameLexicalContextOk,
+  buildLineIndex,
+  lineAtOffset,
+  INTERNAL_DISCLOSURE_PATTERNS,
+  INTERNAL_DISCLOSURE_ENV,
+  INTERNAL_HASH_SALT_ENV,
+  MAX_LINE_LENGTH,
+  MAX_FINDINGS_PER_RULE,
+  MAX_FINDINGS_PER_FILE,
+} from "./internal-disclosure.js";
 export { analyzeEntropy, shannonEntropy } from "./entropy.js";
 export { scanCargoFiles } from "./cargo-scanner.js";
 export { scanGoFiles } from "./go-scanner.js";
@@ -100,6 +130,8 @@ export type {
   SolanaMonitorOptions,
   SolanaTransaction,
   PatternEntry,
+  PolicyConfig,
+  InternalDisclosurePolicy,
   WatchlistEntry,
   WatchlistConfig,
   WatchlistAlert,

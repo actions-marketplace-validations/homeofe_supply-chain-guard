@@ -1,3 +1,118 @@
+> Note (2026-07-25, claude-opus-4-8): Released v5.18.0 with the internal-disclosure rule family. Post-review follow-ups in this commit: `spec/` is scanned again (it is the OpenAPI and AsyncAPI convention as often as an RSpec one, and a server URL in an API spec is the shape the family most wants to catch), the deny-list pass now reports its own 400-token per-line budget as INTERNAL_DISCLOSURE_TRUNCATED instead of going quiet, and the per-file cap emits exactly 100 findings while keeping the most severe ones. 75 tests in the family, 1522 in the suite; the 14 vscode-scanner failures are `zip` missing on the Windows dev box and reproduce identically on main.
+
+> Note (2026-07-25, claude-opus-5): Adversarial review of the
+> internal-disclosure family came back FAIL with measured numbers; this is the
+> remediation, measured the same way (axios, express, got, awesome-compose =
+> 992 files, plus an 810 KB single-line bundle).
+> BLOCKER, quadratic scan cost. The 810 KB bundle took 49 s and produced a
+> 26 MB report. Three causes, all fixed: the per-match lexical context
+> (quotedRanges + three indexOf calls) rescanned the whole line for EVERY match
+> on it, the overlap dedupe was quadratic across the whole file (on a bundle
+> every finding shares line 1), and nothing bounded the match count. Now: one
+> line index per file built once and binary-searched (buildLineIndex /
+> lineAtOffset), per-line context computed once and cached, a 2000-character
+> line limit that skips the rest of an over-long line in a single lastIndex
+> jump, dedupe grouped by line, and caps of 25 findings per rule, 100 per file,
+> 20000 candidate matches per rule. Same file now scans in 0.01 s with a
+> sub-1 KB report. Every limit that fires emits INTERNAL_DISCLOSURE_TRUNCATED
+> (info) - the FILE_TOO_LARGE_SKIPPED principle: a scanner that silently
+> stopped looking is indistinguishable from a clean repository.
+> BLOCKER, test directories were not excluded. TEST_FILE used /\/tests?\//,
+> which requires a LEADING slash, so a top-level test/ or tests/ directory (the
+> dominant JS layout) never matched: 28 of the 35 findings on the sample came
+> from directories that were meant to be excluded. The pattern now matches a
+> leading segment and covers spec/, e2e/, __tests__/, __fixtures__/, __mocks__/,
+> __snapshots__/, fixtures/, testdata/ and test-data/.
+> Universal constants are no longer topology: cloud metadata (169.254.169.254,
+> ECS 169.254.170.2, Amazon Time Sync, Alibaba), Kubernetes and k3s service and
+> DNS defaults, the default pod/service CIDRs, the Docker bridge gateway and
+> host.docker.internal. Each entry names what it is in the source; a real
+> address in the same range still reports.
+> Severity now follows the HOST, not the rule that matched first:
+> INTERNAL_SERVICE_ENDPOINT was promoting every compose and Kubernetes service
+> name to medium by winning the overlap dedupe against the deliberately-low
+> single-label rule. severityForHost() is the single decision point.
+> /Users/ is matched case-SENSITIVELY, which removes the worst false positive
+> in the set: REST routes (/users/:id, /users/{id}, app.get("/users/profile/edit"))
+> were being read as macOS home directories. A route or template parameter after
+> the account segment is rejected as well. Windows keeps both spellings because
+> the drive letter makes it unambiguous.
+> A .local name preceded by a path separator is a module specifier, not a host
+> ("./config.local"), and a name followed by "(" is a method call
+> ("res.local(name, val)" in a changelog).
+> Documentation rebalanced, and this is the one that mattered most: markdown
+> prose AND fenced blocks now report private addresses, ULAs, developer paths
+> and hostnames. Excluding documentation wholesale silenced exactly the case
+> this family exists for - the sample turned up a real /home/<name>/ inside a
+> pasted stack trace in a ```js block that the old behaviour never saw. What
+> stays excluded is what MEASURED as noise: inline code spans (8 findings on
+> the sample, every one an API signature or documented example), ```text
+> fences, and files that exist to BE an example (examples/, fixtures/,
+> *.example.*). The reserved namespace (RFC5737/RFC2606/loopback) is the
+> backstop and works on every surface.
+> Honesty fix: the README said a digest "reveals nothing". An unsalted
+> single-round sha256 of a hostname is dictionary-attackable. The wording now
+> says what it actually buys (out of the file, out of grep, out of reports) and
+> an optional salt was added - SCG_INTERNAL_HASH_SALT, deliberately env-only
+> because a salt committed beside the digests is hashed by the same reader,
+> plus internalDisclosure.hashSalted so a scan without the salt is reported
+> instead of matching nothing and looking clean.
+> Two more real defects found while measuring: line.indexOf("//") treated the
+> "//" of "https://" as a comment start, so every dotted name to the right of a
+> URL was accepted as a hostname (and "#" is now only a comment outside the C
+> family); and "http://unix" - the UNIX-domain-socket pseudo-host used by got,
+> axios and dockerode - was 14 of the 35 sample findings.
+> Result: 3.5 findings per 100 files -> 1.1, with the one genuine leak in the
+> sample (a developer home directory in got's documentation) now REPORTED
+> rather than silently missed. Self-scan stays clean at 0 findings; the new
+> README and doc-comment examples were written into the reserved namespace,
+> same discipline as before. NOT DONE HERE: no version bump, the release is cut
+> separately.
+
+> Note (2026-07-25, claude-opus-5): Added the internal-disclosure rule family
+> (src/internal-disclosure.ts, 8 rules, INTERNAL_*). New detection axis: existing
+> scanners including this one hunt CREDENTIALS, nothing hunts internal TOPOLOGY
+> leaking into a public repo (internal hostnames, private LAN addresses,
+> non-public forge URLs, developer paths, private repo inventories). All rules
+> are shape-based so they work with zero configuration, and INTERNAL_GIT_REMOTE
+> in particular finds a self-hosted forge WITHOUT anyone naming it: any ssh://
+> or scp-style clone URL whose host is not one of the known public forges.
+> Severity is deliberately medium (low for the single-label URL rule):
+> topology is reconnaissance value, not compromise, and the default gate plus
+> --fail-on high/critical stay unaffected, so nobody upgrades into a red build.
+> Scores DO move (documented in the CHANGELOG Changed section).
+> Deny-list solves its own paradox three ways: hashedTerms (sha256 of a term
+> normalised trim+lowercase, publishable, exact-token matching only, generated
+> with the new internal-hash CLI command), externalFile plus
+> SCG_INTERNAL_DISCLOSURE_FILE (never committed, matches reported REDACTED so
+> the report cannot leak what the config kept out), and plaintext patterns for
+> repos that are private anyway. A configured externalFile that is absent is
+> reported at info (INTERNAL_DENYLIST_UNAVAILABLE) instead of silently doing
+> nothing - same fail-closed reasoning as the v5.3 policy validation, and info
+> keeps a CI runner that legitimately has no copy of the file quiet.
+> False positives were treated as the adoption question they are: two layers,
+> a VALUE layer (RFC5737 addresses, RFC2606 names and the .example TLD,
+> loopback, CI/placeholder account names like runner and vscode, container
+> service aliases, CIDR ranges vs host addresses) and a CONTEXT layer (doc
+> files, docs/ and examples/ trees, *.example.* artifacts keep only the
+> hostname/endpoint/clone-URL rules; markdown fenced blocks and inline code
+> spans keep only the clone-URL rule, because the copy-paste clone command is
+> exactly where a self-hosted forge URL really leaks; test fixtures and
+> minified bundles keep none). Extended existing plumbing rather than a
+> parallel system: PatternEntry + valueFilter/valueGroup, allowlist.domains now
+> also answers the host-shaped INTERNAL rules, new POLICY_INVALID_INTERNAL_TERM
+> warning, Finding.category gained "disclosure", INTERNAL_ counts in the
+> repoTrust risk dimension. 43 tests (src/__tests__/internal-disclosure.test.ts)
+> cover a true positive per rule, the false-positive classes, all three
+> deny-list modes and a test that the hashed path never stores or reports
+> plaintext. Self-scan stays clean: the first draft flagged its OWN doc
+> comments, where the endpoint and clone-URL examples were written as plausible
+> internal names, and those were rewritten into the reserved documentation
+> namespace, which is the feature working. Same discipline applies to this
+> file. NOT DONE
+> HERE: no version bump and no dated CHANGELOG heading, the release is cut
+> separately.
+
 > Note (2026-07-25, claude-opus-5): Cut the feed's dependency on the internal
 > security-news aggregator and wired real upstream sources instead. That
 > aggregator was 17 general security RSS feeds, none of them package-malware or

@@ -7,8 +7,79 @@ top; release tags trigger the CI publish pipeline (npm via OIDC + GitHub Release
 
 ## [Unreleased]
 
+## [5.18.0] - 2026-07-25
+
 ### Added
 
+- **Internal-disclosure rule family (`INTERNAL_*`), a new detection axis.**
+  Existing scanners (this one included) hunt CREDENTIALS. Nothing in that
+  category hunts internal TOPOLOGY leaking into a public repository: internal
+  hostnames, private LAN addresses, non-public forge URLs, developer
+  filesystem paths and private repository inventories. None of it is a secret,
+  all of it is reconnaissance material, and it stays in git history long after
+  the file is fixed. New module `src/internal-disclosure.ts` with eight rules:
+  `INTERNAL_PRIVATE_IP` (RFC1918, CGNAT 100.64/10, link-local 169.254/16),
+  `INTERNAL_PRIVATE_IPV6` (ULA fc00::/7), `INTERNAL_HOSTNAME` (.internal,
+  .local, .lan, .corp, .home, .intranet), `INTERNAL_SERVICE_ENDPOINT`
+  (host plus port on a private or internal host), `INTERNAL_GIT_REMOTE`
+  (ssh:// and scp-style remotes on a host that is not a known public forge,
+  which finds a self-hosted forge without anyone having to name it),
+  `INTERNAL_DEV_PATH` (home-directory paths), `INTERNAL_SINGLE_LABEL_URL`
+  (dotless hosts) and `INTERNAL_DENYLIST_MATCH` (configured terms, off by
+  default). Every rule is shape-based, so it protects a repository whose owner
+  configured nothing.
+- **Configurable deny-list that solves its own paradox.** A list of internal
+  hostnames committed to a public repository IS the leak, so
+  `internalDisclosure` in `.supply-chain-guard.yml` supports three modes:
+  `hashedTerms` (sha256 of a term normalised as trim plus lowercase;
+  publishable and exact-token matching only - it keeps the term out of the
+  file, out of grep and out of reports, and with the optional
+  `SCG_INTERNAL_HASH_SALT` plus `hashSalted: true` it also resists the
+  dictionary attack that an unsalted digest of a hostname invites),
+  `externalFile` plus the `SCG_INTERNAL_DISCLOSURE_FILE` environment variable
+  (full regex and literal patterns kept out of the repository, matches
+  reported REDACTED so the report cannot leak them either), and `patterns`
+  (plaintext, for repositories that are private anyway). New CLI command
+  `supply-chain-guard internal-hash <term...>` prints digests and nothing else.
+  A configured `externalFile` that is absent is reported as
+  `INTERNAL_DENYLIST_UNAVAILABLE` (info) and an entry that cannot be compiled
+  as `INTERNAL_DENYLIST_INVALID_ENTRY` (medium): a deny-list that quietly
+  stopped running otherwise looks exactly like a clean repository. Neither
+  diagnostic prints the entry, and the environment variable is named without
+  its value, because a path can itself contain an account name.
+- **False-positive controls, because a rule that screams on every README gets
+  disabled.** Three layers, tuned against axios, express, got and
+  awesome-compose (992 files): 3.5 findings per 100 files before, 1.1 after.
+  1. Reserved VALUES never fire: RFC5737 addresses, RFC2606 names and the
+     `.example` TLD, loopback, placeholder and CI account names such as
+     `runner` or `vscode`, container service aliases and the `unix` / `npipe`
+     socket pseudo-hosts, CIDR ranges as opposed to host addresses, and the
+     universal infrastructure constants that are identical in every
+     installation (cloud metadata `169.254.169.254`, ECS `169.254.170.2`,
+     Amazon Time Sync `169.254.169.123`, Alibaba `100.100.100.200`, the
+     Kubernetes `10.96.0.1` / `10.96.0.10` and k3s `10.43.0.1` / `10.43.0.10`,
+     the default service and pod CIDRs, the Docker bridge gateway
+     `172.17.0.1`, and `host.docker.internal` and its siblings).
+  2. LEXICAL position has to fit the claim: an internal-only TLD must be the
+     LAST label (`config.internal.timeout`, `settings.local.json`), a name
+     preceded by a path separator is a module specifier and not a host
+     (`./config.local`), a name followed by `(` is a method call
+     (`res.local(name, val)`), a URL scheme is no longer mistaken for the start
+     of a comment, and in programming-language sources a bare dotted name is
+     only reported inside a string literal, a comment or a URL.
+  3. The SURFACE decides which rules stay armed: test and fixture directories
+     and minified or bundled output report nothing, files that exist to BE an
+     example (`examples/`, `fixtures/`, `*.example.*`) keep the hostname,
+     endpoint and clone-URL rules, and documentation prose and fenced blocks
+     keep everything except the single-label URL.
+  The README documents the full matrix.
+- **An optional per-project salt for the hashed deny-list.**
+  `SCG_INTERNAL_HASH_SALT` (held outside the repository, so a reader of the
+  repository cannot use it) is mixed into every digest, and
+  `internalDisclosure.hashSalted: true` declares that the committed digests are
+  salted so a scan that runs without the salt is reported as
+  `INTERNAL_DENYLIST_UNAVAILABLE` rather than matching nothing and looking
+  clean.
 - **Upstream threat-feed import (`npm run feed:import`).** Malicious-package
   IOCs are now imported from public advisory databases instead of being read
   out of a general security-news aggregator by hand. Primary source: the
@@ -34,11 +105,45 @@ top; release tags trigger the CI publish pipeline (npm via OIDC + GitHub Release
   the two project constants that upstream does not publish (confidence 0.9
   single-source / 1.0 corroborated), the ecosystem prefix table, the
   version-range rules, and the failure mode.
+- **Bounded cost on generated files, and a new `INTERNAL_DISCLOSURE_TRUNCATED`
+  (info) rule so a limit is never silent.** The internal-disclosure scan is now
+  flat in the size of a file rather than quadratic in the number of matches on
+  a line: line offsets are computed once per file and binary-searched, each
+  line's quoting and comment structure is computed once per line instead of
+  once per match, an over-long line is skipped in one step, and findings are
+  capped at 25 per rule and 100 per file with a 20000-candidate ceiling per
+  rule. Measured on an 810 KB single-line bundle: 49 s and a 26 MB report
+  before, 0.01 s and under 1 KB after. Every limit that fires adds one
+  `INTERNAL_DISCLOSURE_TRUNCATED` finding naming it, on the same principle as
+  `FILE_TOO_LARGE_SKIPPED`.
 - `pypi:` is now a recognised OSV export ecosystem, so PyPI package IOCs are
   no longer dropped from `supply-chain-guard feed osv`.
 
 ### Changed
 
+- **Scores will move, exit codes will not.** The internal-disclosure family
+  reports `medium` (weakest rule: `low`), never `high` or `critical`, which
+  stay reserved for credential-shaped findings. The default gate exits
+  non-zero on critical and high only, so upgrading cannot turn a passing build
+  red, and `--fail-on high` / `--fail-on critical` are unaffected. Two things
+  do change: the risk score rises where internal topology is present (each
+  medium adds points, which can move a `clean` report to `low` or `medium`),
+  and a pipeline running `--fail-on medium` or lower will see the new
+  findings. The family respects `rules.disable`, `rules.severityOverrides`,
+  `suppress` (including `path:` globs), `ignore`, `--exclude`,
+  `--min-severity` and inline `scg-ignore-next-line`.
+- `allowlist.domains` now also answers `INTERNAL_HOSTNAME`,
+  `INTERNAL_SERVICE_ENDPOINT` and `INTERNAL_GIT_REMOTE` for the allowlisted
+  host, alongside the threat-intel rules it already covered. The README notes
+  the tradeoff: naming a domain there publishes it, so a path-scoped
+  `suppress` entry is the leak-free alternative.
+- `Finding.category` gained `"disclosure"`, and the `INTERNAL_` prefix is
+  counted in the `repoTrust` risk dimension, so the family is not invisible to
+  `riskDimensions` (the trap the agent-surface rules fell into before v5.10).
+- Policy config validation learned `POLICY_INVALID_INTERNAL_TERM`: a
+  `hashedTerms` entry that is not a sha256 digest, or a `patterns` entry that
+  is not a valid regex, is reported instead of being silently dropped. Same
+  fail-closed reasoning as v5.3.
 - The import refuses to invent indicators. Only an exact upstream pin
   (`= 1.2.3` -> `name@1.2.3`) or an all-versions range (`>= 0` -> bare name) is
   mapped; a bounded range is reported as unmappable rather than collapsed into
@@ -51,6 +156,22 @@ top; release tags trigger the CI publish pipeline (npm via OIDC + GitHub Release
   re-parsed in memory, and a rewrite that does not re-parse to the expected
   entry count is rolled back. A network error leaves `src/threat-intel.ts` and
   `feed.json` byte-identical and exits non-zero.
+
+### Fixed
+
+- `spec/` is scanned rather than skipped. It is the conventional OpenAPI and
+  AsyncAPI directory as often as it is an RSpec one, and a `servers[].url` in
+  an API spec is precisely the endpoint-plus-port shape this family exists to
+  catch. RSpec files are still excluded by the `_spec.` suffix, which is the
+  part that actually identifies a test.
+- The deny-list pass reports its own per-line token budget. A line short enough
+  to clear the length guard could still exceed 400 candidate tokens, and the
+  pass went quiet past that point without a word. It now emits
+  `INTERNAL_DISCLOSURE_TRUNCATED` naming the line, so the one way a CONFIGURED
+  term could be missed in silence is closed.
+- A file that hits the per-file cap reports exactly 100 findings rather than
+  101, and the cap now keeps the most severe findings instead of whichever
+  rules happen to be declared first.
 
 ## [5.17.10] - 2026-07-25
 
@@ -1724,6 +1845,7 @@ A single threat actor (claiming "TeamPCP") compromised both the Checkmarx KICS D
 - Initial release: GlassWorm detection, npm scanning, Solana C2 monitoring
 
 [Unreleased]: https://github.com/homeofe/supply-chain-guard/compare/v5.17.10...HEAD
+[5.18.0]: https://github.com/homeofe/supply-chain-guard/releases/tag/v5.18.0
 [5.17.10]: https://github.com/homeofe/supply-chain-guard/releases/tag/v5.17.10
 [5.17.9]: https://github.com/homeofe/supply-chain-guard/releases/tag/v5.17.9
 [5.17.8]: https://github.com/homeofe/supply-chain-guard/releases/tag/v5.17.8
