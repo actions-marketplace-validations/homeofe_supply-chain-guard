@@ -1,3 +1,28 @@
+> Note (2026-07-25, claude-opus-4-8): Released v5.17.9 - daily threat-intel refresh
+> (scheduled task). arena.elvatis.com/api/news again carried mostly named campaigns with
+> no atomic IOCs, so - per the task's STEP 1b - enriched from primary vendor write-ups.
+> Added ONE new campaign: FakeAgent / SectopRAT fake Claude Desktop malvertising (Huntress
+> + BleepingComputer + Help Net Security + cyberpress, 2026-07-21 to 07-22). Bing "Claude
+> Desktop app" ads -> malicious public Claude Artifact on the legitimate claude[.]ai domain
+> -> attacker redirect domains (download-app[.]us, claude.ai.download-app[.]us,
+> downloading-api.it[.]com, plus 5ca8758c-...[.]com and polse[.]us) -> trojanized
+> ClaudeDesktop.exe sideloading libcef.dll = SectopRAT/ArechClient2 infostealer w/ HVNC;
+> EtherHiding via BNB Smart Chain for live C2. Added 5 domains, a 6-IP representative
+> subset of the ~21 published rotating BuyVM/FranTech C2 pool (Akamai CDN edge + remainder
+> omitted to limit false positives), 5 payload SHA-256 hashes, and the 2 EtherHiding C2
+> addresses (as feed type "url", per the EtherRAT precedent). DISCIPLINE: the legitimate
+> claude[.]ai apex is NOT blocked (only the abused artifact path was malicious) and the
+> it[.]com registry apex is NOT blocked (only the attacker subdomain). Reviewed but NOT
+> added: BlueNoroff Zoom phishing kit (80+ typosquat domains reported but none enumerated
+> in sources - no addable atomic indicator), Golden Chickens TinyEgg/ChonkyChicken (no
+> hashes/C2 in available write-ups), Slopsquatting/HalluSquatting (conceptual AI-attack
+> pattern, no packages named), Talos Python-packaging research (no IOCs), and the Straiker
+> Claude Code impersonation / Amatera set (single-source, March-May, largely shared-host
+> subdomains + overlaps the existing ACR-Stealer entry - FP-heavy, skipped). Added to
+> ioc-blocklist.ts + threat-intel.ts with 4 new FakeAgent tests (incl. a claude.ai
+> negative). feed.json regenerated. Build gates + tests expected green (only the 14
+> vscode-scanner "zip" tests fail locally on Windows - known env gap, green in CI).
+>
 > Note (2026-07-24, claude-opus-4-8): Released v5.17.8 - daily threat-intel refresh
 > (scheduled task, run interactively). arena.elvatis.com/api/news carried only named
 > campaigns with no atomic IOCs this cycle, so - at the user's direction - widened the

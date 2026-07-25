@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "package": "supply-chain-guard",
-  "version": "5.17.8",
-  "entryCount": 412,
+  "version": "5.17.9",
+  "entryCount": 430,
   "entries": [
     {
       "type": "domain",
@@ -3700,6 +3700,168 @@
       "family": "AMOS Stealer",
       "campaign": "Apex macOS infostealer",
       "firstSeen": "2026-07-22"
+    },
+    {
+      "type": "domain",
+      "value": "download-app.us",
+      "severity": "critical",
+      "confidence": 0.95,
+      "family": "SectopRAT",
+      "campaign": "FakeAgent",
+      "firstSeen": "2026-07-21"
+    },
+    {
+      "type": "domain",
+      "value": "claude.ai.download-app.us",
+      "severity": "critical",
+      "confidence": 0.95,
+      "family": "SectopRAT",
+      "campaign": "FakeAgent",
+      "firstSeen": "2026-07-21"
+    },
+    {
+      "type": "domain",
+      "value": "downloading-api.it.com",
+      "severity": "critical",
+      "confidence": 0.95,
+      "family": "SectopRAT",
+      "campaign": "FakeAgent",
+      "firstSeen": "2026-07-21"
+    },
+    {
+      "type": "domain",
+      "value": "5ca8758c-02d0-4a72-89c8-d468b66dda41.com",
+      "severity": "critical",
+      "confidence": 0.95,
+      "family": "SectopRAT",
+      "campaign": "FakeAgent",
+      "firstSeen": "2026-07-21"
+    },
+    {
+      "type": "domain",
+      "value": "polse.us",
+      "severity": "critical",
+      "confidence": 0.95,
+      "family": "SectopRAT",
+      "campaign": "FakeAgent",
+      "firstSeen": "2026-07-21"
+    },
+    {
+      "type": "ip",
+      "value": "107.189.24.67",
+      "severity": "high",
+      "confidence": 0.9,
+      "family": "SectopRAT",
+      "campaign": "FakeAgent",
+      "firstSeen": "2026-07-21"
+    },
+    {
+      "type": "ip",
+      "value": "104.194.133.210",
+      "severity": "high",
+      "confidence": 0.9,
+      "family": "SectopRAT",
+      "campaign": "FakeAgent",
+      "firstSeen": "2026-07-21"
+    },
+    {
+      "type": "ip",
+      "value": "45.59.124.17",
+      "severity": "high",
+      "confidence": 0.9,
+      "family": "SectopRAT",
+      "campaign": "FakeAgent",
+      "firstSeen": "2026-07-21"
+    },
+    {
+      "type": "ip",
+      "value": "107.189.17.143",
+      "severity": "high",
+      "confidence": 0.9,
+      "family": "SectopRAT",
+      "campaign": "FakeAgent",
+      "firstSeen": "2026-07-21"
+    },
+    {
+      "type": "ip",
+      "value": "195.110.58.222",
+      "severity": "high",
+      "confidence": 0.9,
+      "family": "SectopRAT",
+      "campaign": "FakeAgent",
+      "firstSeen": "2026-07-21"
+    },
+    {
+      "type": "ip",
+      "value": "191.101.80.211",
+      "severity": "high",
+      "confidence": 0.9,
+      "family": "SectopRAT",
+      "campaign": "FakeAgent",
+      "firstSeen": "2026-07-21"
+    },
+    {
+      "type": "hash",
+      "value": "1cd58cfba596da296ab1878d74023e00c399345a1b6c2a0e5446c53563f4e3bb",
+      "severity": "critical",
+      "confidence": 0.95,
+      "family": "SectopRAT",
+      "campaign": "FakeAgent",
+      "firstSeen": "2026-07-21"
+    },
+    {
+      "type": "hash",
+      "value": "26bae4d7012bf59847ab4036a065419c3d4ca47e020479f55b3b2c6d0d21394a",
+      "severity": "critical",
+      "confidence": 0.95,
+      "family": "SectopRAT",
+      "campaign": "FakeAgent",
+      "firstSeen": "2026-07-21"
+    },
+    {
+      "type": "hash",
+      "value": "1fe3646d27d286db8123297e06ae7badf3e26f352a04f91b6d82c28869a91664",
+      "severity": "critical",
+      "confidence": 0.95,
+      "family": "SectopRAT",
+      "campaign": "FakeAgent",
+      "firstSeen": "2026-07-21"
+    },
+    {
+      "type": "hash",
+      "value": "f8acb8f5cf88b77a4c27d7fd6856aa299bb178e85f9963c2fbd447d818da3ed0",
+      "severity": "critical",
+      "confidence": 0.95,
+      "family": "SectopRAT",
+      "campaign": "FakeAgent",
+      "firstSeen": "2026-07-21"
+    },
+    {
+      "type": "hash",
+      "value": "fd826215add30c1319eefa291b6eaf8ddfa7720cfe816c49aef6fe8a88de7939",
+      "severity": "critical",
+      "confidence": 0.95,
+      "family": "SectopRAT",
+      "campaign": "FakeAgent",
+      "firstSeen": "2026-07-21"
+    },
+    {
+      "type": "url",
+      "value": "0xe012d0f34cde9b870e9d9ed566ea5f8fd9b92228",
+      "severity": "critical",
+      "confidence": 0.9,
+      "family": "SectopRAT",
+      "campaign": "FakeAgent EtherHiding C2",
+      "firstSeen": "2026-07-21"
+    },
+    {
+      "type": "url",
+      "value": "0xc1907d7be91f95903ad66d775c397302e7dd9228",
+      "severity": "critical",
+      "confidence": 0.9,
+      "family": "SectopRAT",
+      "campaign": "FakeAgent EtherHiding C2",
+      "firstSeen": "2026-07-21"
     }
   ]
 }

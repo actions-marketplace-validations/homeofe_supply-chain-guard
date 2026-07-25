@@ -9,10 +9,11 @@
 
 ---
 
-## Releases (97, newest first)
+## Releases (98, newest first)
 
 | Version | Date | Headline |
 |---------|------|----------|
+| v5.17.9 | 2026-07-25 | Threat intel: FakeAgent / SectopRAT fake Claude Desktop malvertising |
 | v5.17.8 | 2026-07-24 | Threat intel: jscrambler npm compromise, cPanel/WHM GitHub Actions abuse, and the Apex macOS infostealer |
 | v5.17.7 | 2026-07-21 | ### Fixed |
 | v5.17.6 | 2026-07-20 | Threat intel: SleeperGem - three malicious RubyGems releases backdoor developer machines |

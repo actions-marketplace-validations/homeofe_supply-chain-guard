@@ -149,6 +149,21 @@ export const KNOWN_C2_DOMAINS: string[] = [
   // out-of-band beaconing - a specific UUID subdomain, NOT the dnshook.site apex
   // (a legitimate DNS-logging service), so no false positives on the parent host.
   "f5b0b742-240a-4811-8a5b-b0ba6060685d.dnshook.site",
+
+  // FakeAgent campaign / SectopRAT via fake Claude Desktop app (Huntress / BleepingComputer /
+  // Help Net Security / cyberpress, July 21-22, 2026). Bing "Claude Desktop app" ads pointed at
+  // a malicious public Claude Artifact that redirected through these attacker-registered domains
+  // to a trojanized ClaudeDesktop.exe (JetBrains Chromium binary sideloading a malicious
+  // libcef.dll -> SectopRAT / ArechClient2 infostealer with HVNC; EtherHiding via BNB Smart
+  // Chain resolves the live C2). These are attacker-owned apexes/subdomains. The legitimate
+  // claude.ai apex is intentionally NOT listed (Anthropic-owned; only the abused artifact path
+  // was malicious), and the it.com registry apex is NOT listed - only the specific attacker
+  // subdomain downloading-api.it.com.
+  "download-app.us",
+  "claude.ai.download-app.us",
+  "downloading-api.it.com",
+  "5ca8758c-02d0-4a72-89c8-d468b66dda41.com",
+  "polse.us",
 ];
 
 // ---------------------------------------------------------------------------
@@ -227,6 +242,19 @@ export const KNOWN_C2_IPS: string[] = [
   // auth bypass) is the exploited flaw; the compromised maintainer account is a
   // legitimate victim and is intentionally NOT added to the malicious-accounts list.
   "43.228.157.68",
+
+  // FakeAgent campaign / SectopRAT via fake Claude Desktop app (Huntress, July 21-22, 2026).
+  // Huntress published ~21 staging/C2 IPs (a rotating BuyVM/FranTech VPS pool plus outliers).
+  // A representative subset of the dedicated-VPS C2 hosts is recorded here; the Akamai CDN edge
+  // 2.24.131.246 is intentionally omitted (shared CDN, false-positive risk), and the remaining
+  // rotating-pool addresses are left out as ephemeral. Durable coverage comes from the domains,
+  // file hashes and EtherHiding C2 addresses recorded for this campaign.
+  "107.189.24.67",
+  "104.194.133.210",
+  "45.59.124.17",
+  "107.189.17.143",
+  "195.110.58.222",
+  "191.101.80.211",
 ];
 
 // ---------------------------------------------------------------------------
@@ -393,6 +421,15 @@ export const KNOWN_MALICIOUS_HASHES: Record<string, string> = {
   "fbbcf4d8f98168f78f5c0c47a9ae56d59ec8ac84a7c9ca6b797fedfb8d62d2bd": "jscrambler compromise infostealer payload (SHA256)",
   "b7ca95d1b23c8e67416a25cedf741de0917c2096bbc9d24649eea7853d054903": "jscrambler compromise infostealer payload (SHA256)",
   "c8fd47d36bdf7c825378593ab82ed8c24d1dc52e26b507812393e24e1d5201fd": "jscrambler compromise infostealer payload (SHA256)",
+
+  // FakeAgent campaign / SectopRAT via fake Claude Desktop app (Huntress / BleepingComputer,
+  // July 21-22, 2026) - the trojanized ClaudeDesktop.exe (JetBrains Chromium binary sideloading
+  // a malicious libcef.dll) and related SectopRAT / ArechClient2 payload files per Huntress's IOC set.
+  "1cd58cfba596da296ab1878d74023e00c399345a1b6c2a0e5446c53563f4e3bb": "FakeAgent SectopRAT payload (SHA256)",
+  "26bae4d7012bf59847ab4036a065419c3d4ca47e020479f55b3b2c6d0d21394a": "FakeAgent SectopRAT payload (SHA256)",
+  "1fe3646d27d286db8123297e06ae7badf3e26f352a04f91b6d82c28869a91664": "FakeAgent SectopRAT payload (SHA256)",
+  "f8acb8f5cf88b77a4c27d7fd6856aa299bb178e85f9963c2fbd447d818da3ed0": "FakeAgent SectopRAT payload (SHA256)",
+  "fd826215add30c1319eefa291b6eaf8ddfa7720cfe816c49aef6fe8a88de7939": "FakeAgent SectopRAT payload (SHA256)",
 };
 
 // ---------------------------------------------------------------------------

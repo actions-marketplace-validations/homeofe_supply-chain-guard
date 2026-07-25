@@ -7,6 +7,27 @@ top; release tags trigger the CI publish pipeline (npm via OIDC + GitHub Release
 
 ## [Unreleased]
 
+## [5.17.9] - 2026-07-25
+**Threat intel: FakeAgent / SectopRAT fake Claude Desktop malvertising**
+
+Added detection for the FakeAgent campaign (2026-07-21 to 2026-07-22) after the daily
+news scan surfaced it and primary vendor write-ups (Huntress, BleepingComputer, Help
+Net Security, cyberpress) supplied the concrete indicators.
+
+- **FakeAgent / SectopRAT** (2026-07-21). Bing ads for the "Claude Desktop app"
+  pointed at a malicious public Claude Artifact hosted on the legitimate `claude[.]ai`
+  domain (downloaded ~7,100 times before removal). Clicking Download redirected
+  victims through attacker-registered domains (`download-app[.]us`,
+  `claude.ai.download-app[.]us`, `downloading-api.it[.]com`) to a trojanized
+  `ClaudeDesktop.exe`: a legitimate JetBrains Chromium binary that sideloads a
+  malicious `libcef.dll` to deliver the SectopRAT (ArechClient2) infostealer with
+  HVNC. The malware uses EtherHiding over the BNB Smart Chain to resolve its live C2.
+  At least 29 organizations were compromised. Added the attacker domains, a
+  representative subset of the SectopRAT C2 IPs, the five payload SHA-256 hashes and
+  the two EtherHiding C2 addresses. The legitimate `claude[.]ai` apex is deliberately
+  not blocked (only the abused artifact path was malicious), and the `it[.]com`
+  registry apex is excluded in favor of the specific attacker subdomain.
+
 ## [5.17.8] - 2026-07-24
 **Threat intel: jscrambler npm compromise, cPanel/WHM GitHub Actions abuse, and the Apex macOS infostealer**
 
@@ -1596,6 +1617,7 @@ A single threat actor (claiming "TeamPCP") compromised both the Checkmarx KICS D
 - Initial release: GlassWorm detection, npm scanning, Solana C2 monitoring
 
 [Unreleased]: https://github.com/homeofe/supply-chain-guard/compare/v5.17.7...HEAD
+[5.17.9]: https://github.com/homeofe/supply-chain-guard/releases/tag/v5.17.9
 [5.17.8]: https://github.com/homeofe/supply-chain-guard/releases/tag/v5.17.8
 [5.17.7]: https://github.com/homeofe/supply-chain-guard/releases/tag/v5.17.7
 [5.17.6]: https://github.com/homeofe/supply-chain-guard/releases/tag/v5.17.6

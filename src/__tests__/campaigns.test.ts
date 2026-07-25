@@ -2844,4 +2844,66 @@ describe("Campaign Signatures", () => {
       expect(finding?.severity).toBe("critical");
     });
   });
+
+  // =================================================================
+  // FakeAgent campaign / SectopRAT via fake Claude Desktop app
+  // (Huntress / BleepingComputer / Help Net Security, July 21-22, 2026)
+  // =================================================================
+
+  describe("FakeAgent SectopRAT fake Claude Desktop (July 2026)", () => {
+    it("should detect an attacker-registered redirect domain", async () => {
+      fs.writeFileSync(
+        path.join(tempDir, "redirect.js"),
+        'const next = "https://downloading-api.it.com/html/claude/win";'
+      );
+
+      const report = await scan({ target: tempDir, format: "text" });
+      const finding = report.findings.find(
+        (f) => f.rule === "IOC_KNOWN_C2_DOMAIN"
+      );
+      expect(finding).toBeDefined();
+      expect(finding?.severity).toBe("critical");
+    });
+
+    it("should detect the trojanized ClaudeDesktop.exe payload hash", async () => {
+      fs.writeFileSync(
+        path.join(tempDir, "hashes.js"),
+        'const h = "1cd58cfba596da296ab1878d74023e00c399345a1b6c2a0e5446c53563f4e3bb";'
+      );
+
+      const report = await scan({ target: tempDir, format: "text" });
+      const finding = report.findings.find(
+        (f) => f.rule === "IOC_KNOWN_MALWARE_HASH"
+      );
+      expect(finding).toBeDefined();
+      expect(finding?.severity).toBe("critical");
+    });
+
+    it("should detect a SectopRAT C2 IP", async () => {
+      fs.writeFileSync(
+        path.join(tempDir, "c2.js"),
+        'const c2 = "107.189.24.67";'
+      );
+
+      const report = await scan({ target: tempDir, format: "text" });
+      const finding = report.findings.find(
+        (f) => f.rule === "IOC_KNOWN_C2_IP"
+      );
+      expect(finding).toBeDefined();
+      expect(finding?.severity).toBe("critical");
+    });
+
+    it("should NOT flag the legitimate claude.ai domain", async () => {
+      fs.writeFileSync(
+        path.join(tempDir, "legit.js"),
+        'const url = "https://claude.ai/download";'
+      );
+
+      const report = await scan({ target: tempDir, format: "text" });
+      const finding = report.findings.find(
+        (f) => f.rule === "IOC_KNOWN_C2_DOMAIN"
+      );
+      expect(finding).toBeUndefined();
+    });
+  });
 });
