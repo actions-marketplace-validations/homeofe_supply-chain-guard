@@ -2,7 +2,7 @@
 // advisory databases into the curated feed (src/threat-intel.ts BUNDLED_FEED),
 // then regenerate feed.json.
 //
-//   node scripts/import-threat-feed.mjs              -> import the last 7 days
+//   node scripts/import-threat-feed.mjs              -> import the last 14 days
 //   node scripts/import-threat-feed.mjs --dry-run    -> report only, write nothing
 //   node scripts/import-threat-feed.mjs --days 30 --limit 500
 //   node scripts/import-threat-feed.mjs --json       -> machine-readable report
@@ -13,8 +13,10 @@
 //      Reviewed by GitHub's security team, CWE-506 "Embedded Malicious Code".
 //      Data licensed CC BY 4.0 - attribution travels with every imported entry
 //      in its `source` field and is documented in docs/threat-feed-sources.md.
-//      GITHUB_TOKEN / GH_TOKEN is OPTIONAL: it only raises the REST rate limit
-//      from 60 to 5000 requests/hour. Without it the import still works.
+//      GITHUB_TOKEN / GH_TOKEN raises the REST rate limit from 60 to 5000
+//      requests/hour. It needs no scopes. It is optional only for a window small
+//      enough to fit the 60-request anonymous budget; the default --max-pages 200
+//      does not, so a default run REQUIRES one and fails fast without it.
 //   2. OSV.dev querybatch (corroboration only, never discovery)
 //      POST https://api.osv.dev/v1/querybatch
 //      Confirms the package is also listed as malicious (a MAL- id, sourced
@@ -112,6 +114,9 @@ export const SEVERITY_MAP = {
  */
 export const CONFIDENCE_SINGLE_SOURCE = 0.9;
 export const CONFIDENCE_CORROBORATED = 1.0;
+
+/** GitHub's unauthenticated REST allowance, requests/hour. Authenticated is 5000. */
+const ANONYMOUS_REQUEST_BUDGET = 60;
 
 /**
  * Package names are serialized into a TypeScript source file, so the charset
@@ -331,11 +336,18 @@ export function nextPageUrl(linkHeader) {
  * Bounded three ways: an explicit per-request timeout, a hard page cap, and
  * the fixed 100-item page size. Any non-200 or transport error rejects - the
  * caller treats that as fatal and writes nothing.
+ *
+ * The page cap is a SAFETY bound, not a budget: pagination stops as soon as the
+ * response carries no rel="next", so a quiet window still costs ~3 requests.
+ * Hitting the cap means the window was only partially fetched, and because the
+ * query sorts published/desc the unfetched remainder is the OLDEST part of the
+ * window - the part about to age out of `--days` permanently. That is why
+ * importUpstreamFeed treats truncation as fatal rather than cosmetic.
  */
 export async function fetchMalwareAdvisories({
   since,
   until,
-  maxPages = 10,
+  maxPages = 200,
   timeoutMs = 15000,
   token,
   fetchImpl = globalThis.fetch,
@@ -520,19 +532,38 @@ export function applyEntries(source, entries, { date, sourceLabel = "GitHub Advi
  */
 export async function importUpstreamFeed({
   root = repoRoot,
-  days = 7,
+  days = 14,
   since,
   until,
   limit = 250,
-  maxPages = 10,
+  maxPages = 200,
   timeoutMs = 15000,
   token,
   useOsv = true,
   dryRun = false,
+  allowTruncated = false,
   now = new Date(),
   fetchImpl = globalThis.fetch,
 } = {}) {
   const from = since ?? sinceDate(days, now);
+
+  // Fail fast, before spending the anonymous budget. The anonymous REST allowance is
+  // 60 requests/hour against 5000 authenticated, so a page budget above it cannot
+  // complete unauthenticated: without this the run dies mid-pagination on an opaque
+  // 403 after 60 wasted requests. Checked here rather than in the fetch helper so the
+  // message can name the fix.
+  // Scoped to the real network path: an injected fetchImpl (the offline tests) never
+  // touches GitHub, so it has no budget to exhaust.
+  const resolvedToken = token ?? process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
+  if (!resolvedToken && maxPages > ANONYMOUS_REQUEST_BUDGET && fetchImpl === globalThis.fetch) {
+    throw new Error(
+      `no GITHUB_TOKEN and --max-pages is ${maxPages}: the anonymous REST budget is ` +
+        `${ANONYMOUS_REQUEST_BUDGET} requests/hour, so this run cannot finish. Export a token ` +
+        `(export GITHUB_TOKEN=$(gh auth token)) - it needs no scopes for public advisories - ` +
+        `or pass --max-pages ${ANONYMOUS_REQUEST_BUDGET} or lower to stay inside the anonymous budget.`,
+    );
+  }
+
   const threatIntelPath = join(root, "src", "threat-intel.ts");
   const feedPath = join(root, "feed.json");
 
@@ -545,6 +576,21 @@ export async function importUpstreamFeed({
     token,
     fetchImpl,
   });
+
+  // 1b. Truncation is FATAL. The fetch is newest-first, so a page cap does not
+  // leave a resumable backlog: the next run re-fetches the same newest pages and
+  // can never reach the remainder, which then ages out of the window for good.
+  // A missed malicious package is a silent false negative in a security scanner,
+  // which is the one failure mode this project will not ship, so this fails loudly
+  // instead of importing a knowingly partial window.
+  if (truncated && !allowTruncated) {
+    throw new Error(
+      `page cap reached after ${pages} page(s): the window contains more malware advisories than --max-pages can fetch. ` +
+        `Advisories are fetched newest-first, so the UNFETCHED remainder is the OLDEST part of the window and will age ` +
+        `out permanently - it is NOT picked up by the next run. Raise --max-pages, or narrow the window with ` +
+        `--since/--until and import it in slices. Pass --allow-truncated to knowingly import a partial window.`,
+    );
+  }
 
   // 2. Map (pure).
   const { entries: mapped, skipped } = mapAdvisories(advisories);
@@ -587,6 +633,11 @@ export async function importUpstreamFeed({
     osvError: osv.error ?? null,
     added: selected.length,
     capped,
+    limitApplied: limit,
+    // How many mappable, non-duplicate IOCs were left behind by --limit. These
+    // ARE recoverable by a later run (they stay in the window until --days
+    // expires), unlike anything lost to a page cap.
+    remaining: capped ? added.length - limit : 0,
     entries: selected.map(publicEntry),
     dryRun,
     written: false,
@@ -644,6 +695,7 @@ export function parseArgs(argv) {
     else if (arg === "--until") opts.until = next();
     else if (arg === "--limit") opts.limit = Number(next());
     else if (arg === "--max-pages") opts.maxPages = Number(next());
+    else if (arg === "--allow-truncated") opts.allowTruncated = true;
     else if (arg === "--timeout") opts.timeoutMs = Number(next());
     else if (arg === "--help" || arg === "-h") opts.help = true;
     else throw new Error(`unknown option: ${arg}`);
@@ -656,17 +708,29 @@ const USAGE = `
 
     node scripts/import-threat-feed.mjs [options]
 
-    --days <n>        Look-back window in days (default 7)
-    --since <date>    Explicit start date (YYYY-MM-DD), overrides --days
-    --until <date>    Explicit end date (YYYY-MM-DD)
-    --limit <n>       Maximum new entries to add in one run (default 250)
-    --max-pages <n>   Maximum upstream pages to fetch (default 10)
-    --timeout <ms>    Per-request timeout (default 15000)
-    --no-osv          Skip the OSV.dev corroboration query
-    --dry-run         Report only; write nothing
-    --json            Machine-readable report on stdout
+    --days <n>          Look-back window in days (default 14)
+    --since <date>      Explicit start date (YYYY-MM-DD), overrides --days
+    --until <date>      Explicit end date (YYYY-MM-DD)
+    --limit <n>         Maximum new entries to add in one run (default 250).
+                        Anything over the limit stays available to the next run
+                        until it ages out of the --days window.
+    --max-pages <n>     Maximum upstream pages to fetch (default 200). Pagination
+                        stops early when there is no rel="next", so a quiet window
+                        still costs about 3 requests. Hitting this cap is FATAL:
+                        see --allow-truncated.
+    --allow-truncated   Import even though the page cap was hit. The fetch is
+                        newest-first, so the unfetched remainder is the OLDEST part
+                        of the window and no later run can reach it - it ages out
+                        for good. Only pass this when a knowingly partial import
+                        is what you want.
+    --timeout <ms>      Per-request timeout (default 15000)
+    --no-osv            Skip the OSV.dev corroboration query
+    --dry-run           Report only; write nothing
+    --json              Machine-readable report on stdout
 
-  GITHUB_TOKEN / GH_TOKEN is optional and only raises the REST rate limit.
+  GITHUB_TOKEN / GH_TOKEN is optional for a small window but effectively REQUIRED
+  once a run needs more than 60 requests: the anonymous REST budget is 60/hour,
+  versus 5000/hour authenticated. A rate-limit rejection is fatal and loud.
 `;
 
 const isMain =
@@ -700,7 +764,13 @@ if (isMain) {
     console.log(`  Already in the feed:  ${report.duplicates} duplicate, ${report.covered} covered by a bare-name IOC`);
     console.log(`  Skipped:              ${report.skippedTotal} ${JSON.stringify(report.skipped)}`);
     console.log(`  OSV corroboration:    ${report.osvAvailable ? `${report.corroboratedByOsv} confirmed` : `unavailable (${report.osvError})`}`);
-    console.log(`  New entries:          ${report.added}${report.capped ? " (limit reached)" : ""}`);
+    console.log(
+      `  New entries:          ${report.added}${
+        report.capped
+          ? ` (--limit ${report.limitApplied} reached; ${report.remaining} MORE are ready - re-run to take the next batch, or raise --limit. They stay available only until they age out of the --days window.)`
+          : ""
+      }`,
+    );
     for (const entry of report.entries.slice(0, 20)) {
       console.log(`    ${entry.value}  [${entry.source}]`);
     }

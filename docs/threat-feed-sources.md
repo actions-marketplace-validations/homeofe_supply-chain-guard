@@ -24,10 +24,12 @@ Malware advisories only (CWE-506, "Embedded Malicious Code"), reviewed by
 GitHub's security team. These are the records that say "this published package
 is malware", which is exactly the indicator class this scanner blocks.
 
-- **No account and no API key required.** `GITHUB_TOKEN` / `GH_TOKEN` is read
-  from the environment if present and only raises the REST rate limit from 60
-  to 5000 requests/hour. Without a token the import still works; if the
-  unauthenticated limit is exhausted the run fails with a message that says so.
+- **No account required, and the token needs no scopes.** `GITHUB_TOKEN` /
+  `GH_TOKEN` is read from the environment and raises the REST rate limit from 60
+  to 5000 requests/hour. It is optional only for a window small enough to fit the
+  60-request anonymous budget. The default `--max-pages 200` does not fit it, so a
+  default run needs a token and fails fast with an actionable message rather than
+  dying mid-pagination on a 403.
 - **Licence: CC BY 4.0** (`github/advisory-database`). Attribution is required
   and travels with the data: every imported entry carries its `GHSA-...` id in
   the `source` field, and this page names the database.
@@ -114,26 +116,57 @@ rewritten file is re-parsed and entry-counted before `feed.json` is regenerated.
 
 ```bash
 npm run feed:import -- --dry-run          # report only, writes nothing
-npm run feed:import                       # last 7 days, max 250 new entries
+npm run feed:import                       # last 14 days, max 250 new entries
 npm run feed:import -- --days 30 --limit 500
 npm run feed:import -- --json             # machine-readable report
 ```
 
 | Option | Default | Purpose |
 | --- | --- | --- |
-| `--days <n>` | 7 | Look-back window |
+| `--days <n>` | 14 | Look-back window |
 | `--since <YYYY-MM-DD>` | - | Explicit start date, overrides `--days` |
 | `--until <YYYY-MM-DD>` | - | Explicit end date |
 | `--limit <n>` | 250 | Maximum new entries added in one run |
-| `--max-pages <n>` | 10 | Hard cap on upstream pages fetched |
+| `--max-pages <n>` | 200 | Hard cap on upstream pages fetched; hitting it is fatal |
+| `--allow-truncated` | off | Import anyway when the page cap was hit |
 | `--timeout <ms>` | 15000 | Per-request timeout |
 | `--no-osv` | off | Skip the OSV corroboration query |
 | `--dry-run` | off | Report only |
 | `--json` | off | Machine-readable report |
 
 Network calls are bounded three ways: an explicit per-request timeout on every
-request, a page cap, and the fixed 100-item page size. A daily run with the
-defaults makes at most 11 requests.
+request, a page cap, and the fixed 100-item page size. Pagination stops as soon
+as a response carries no `rel="next"`, so a quiet window costs about 3 requests
+regardless of how high `--max-pages` is; the cap only binds on an unusually busy
+window.
+
+### Why the page cap is fatal, and the limit is not
+
+The two caps fail in completely different ways, and only one of them is
+recoverable.
+
+`--limit` is a **review** bound. Entries over the limit are still in the window, so
+the next run picks them up and the report prints how many are waiting. That makes
+them recoverable, but only conditionally: a run drains at most `--limit` per run, so
+the leftovers survive only while `remaining <= limit * runs_left_before_they_expire`.
+On a burst window the arithmetic does not close and the excess ages out just as
+page-cap loss does. The difference is that the number is reported, so the operator
+can widen `--days`, raise `--limit`, or slice the window deliberately.
+
+`--max-pages` is a **correctness** bound. The upstream query sorts
+`published/desc`, so a page cap keeps the newest advisories and never fetches the
+oldest ones - precisely those closest to ageing out. There is no cursor: the next
+run starts again at page 1 and re-fetches the same newest pages, so it can never
+reach the remainder. Those advisories are therefore lost permanently, which in a
+scanner means a silent false negative. Truncation consequently **aborts the import
+and exits non-zero** rather than writing a knowingly partial window. Recover by
+raising `--max-pages`, or by slicing the window with `--since`/`--until`. Only
+pass `--allow-truncated` when a partial import is genuinely what you want.
+
+Because a busy window can need hundreds of requests, `GITHUB_TOKEN` is optional
+for a small window but effectively required for a large one: the anonymous REST
+budget is 60 requests/hour against 5000 authenticated, and a rate-limit rejection
+is fatal and loud.
 
 ### Failure mode
 

@@ -733,6 +733,105 @@ describe("importUpstreamFeed failure mode", () => {
     });
     expect(report.added).toBe(2);
     expect(report.capped).toBe(true);
+    expect(report.limitApplied).toBe(2);
+    // The 3 left behind are recoverable by a later run, unlike a page-cap loss.
+    expect(report.remaining).toBe(3);
+  });
+
+  // A page cap is NOT a resumable backlog. The query is published/desc, so the
+  // unfetched remainder is the OLDEST part of the window and the next run re-fetches
+  // the same newest pages - the remainder ages out of --days permanently. Silently
+  // importing a partial window is a false negative in a security scanner, so it
+  // must be fatal. Regression guard for the 2026-07-26 run, where the cap dropped
+  // 94% of the window and the report called it "page cap reached" and exited 0.
+  it("refuses to import a truncated window and writes nothing", async () => {
+    const { importUpstreamFeed } = await load();
+    const before = fs.readFileSync(path.join(tmpRoot, "src", "threat-intel.ts"), "utf8");
+    let calls = 0;
+    const alwaysMorePages = async () => {
+      calls++;
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: (h: string) => (h === "link" ? '<https://next.example/page>; rel="next"' : null) },
+        json: async () => [
+          advisory({
+            ghsa_id: `GHSA-trunc${calls}-bbbb-cccc`,
+            vulnerabilities: [
+              { package: { ecosystem: "npm", name: `scg-fixture-trunc-${calls}` }, vulnerable_version_range: ">= 0" },
+            ],
+          }),
+        ],
+      };
+    };
+    await expect(
+      importUpstreamFeed({ root: tmpRoot, maxPages: 2, useOsv: false, fetchImpl: alwaysMorePages }),
+    ).rejects.toThrow(/page cap reached/);
+    // Inert failure: the source file is byte-identical.
+    expect(fs.readFileSync(path.join(tmpRoot, "src", "threat-intel.ts"), "utf8")).toBe(before);
+  });
+
+  it("imports a truncated window only when --allow-truncated is passed", async () => {
+    const { importUpstreamFeed } = await load();
+    let calls = 0;
+    const alwaysMorePages = async () => {
+      calls++;
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: (h: string) => (h === "link" ? '<https://next.example/page>; rel="next"' : null) },
+        json: async () => [
+          advisory({
+            ghsa_id: `GHSA-allow${calls}-bbbb-cccc`,
+            vulnerabilities: [
+              { package: { ecosystem: "npm", name: `scg-fixture-allow-${calls}` }, vulnerable_version_range: ">= 0" },
+            ],
+          }),
+        ],
+      };
+    };
+    const report = await importUpstreamFeed({
+      root: tmpRoot,
+      maxPages: 2,
+      allowTruncated: true,
+      useOsv: false,
+      fetchImpl: alwaysMorePages,
+    });
+    expect(report.truncated).toBe(true);
+    expect(report.added).toBe(2);
+  });
+
+  it("derives a 14-day window when days is not passed", async () => {
+    const { importUpstreamFeed } = await load();
+    const report = await importUpstreamFeed({
+      root: tmpRoot,
+      useOsv: false,
+      dryRun: true,
+      now: new Date("2026-07-26T12:00:00Z"),
+      fetchImpl: singlePage([]),
+    });
+    expect(report.since).toBe("2026-07-12");
+  });
+
+  // Fails BEFORE spending any of the 60-request anonymous budget, so the operator
+  // gets an actionable message instead of an opaque 403 mid-pagination.
+  it("refuses a default-sized real-network run with no token", async () => {
+    const { importUpstreamFeed } = await load();
+    const noToken = { ...process.env };
+    delete noToken.GITHUB_TOKEN;
+    delete noToken.GH_TOKEN;
+    const saved = { GITHUB_TOKEN: process.env.GITHUB_TOKEN, GH_TOKEN: process.env.GH_TOKEN };
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_TOKEN;
+    try {
+      await expect(
+        // fetchImpl omitted on purpose: the guard is scoped to the real network path.
+        importUpstreamFeed({ root: tmpRoot, maxPages: 200, useOsv: false }),
+      ).rejects.toThrow(/no GITHUB_TOKEN/);
+    } finally {
+      if (saved.GITHUB_TOKEN !== undefined) process.env.GITHUB_TOKEN = saved.GITHUB_TOKEN;
+      if (saved.GH_TOKEN !== undefined) process.env.GH_TOKEN = saved.GH_TOKEN;
+    }
   });
 });
 
@@ -755,5 +854,26 @@ describe("parseArgs", () => {
   it("rejects an unknown option instead of ignoring it", async () => {
     const { parseArgs } = await load();
     expect(() => parseArgs(["--wat"])).toThrow(/unknown option/);
+  });
+
+  // --allow-truncated is the only documented recovery path from the fatal page-cap
+  // error, so a flag that parsed but never reached importUpstreamFeed would be a
+  // silent no-op that only surfaced during an incident.
+  it("parses --allow-truncated and --max-pages", async () => {
+    const { parseArgs } = await load();
+    expect(parseArgs(["--allow-truncated", "--max-pages", "7"])).toEqual({
+      allowTruncated: true,
+      maxPages: 7,
+      dryRun: false,
+      useOsv: true,
+      json: false,
+    });
+  });
+
+  // The default window width is the whole point of the 5.19.0 change: it sets how
+  // much of a missed run is still recoverable, so it is asserted, not commented.
+  it("looks back 14 days by default", async () => {
+    const { sinceDate } = await load();
+    expect(sinceDate(14, new Date("2026-07-26T12:00:00Z"))).toBe("2026-07-12");
   });
 });
