@@ -1,3 +1,165 @@
+> Note (2026-07-29, claude-opus-5, third pass - v5.21.0): Emre asked for the two deferred items
+> plus a general quality lift, then the release. A second measurement workflow (4 agents) and a
+> 3-lens adversarial judge panel ran first. The judges refuted three of the dossier's own
+> recommendations AND caught two errors in the code I had landed an hour earlier.
+>
+> BIGGEST FIND, and it was nobody's brief: npm ALIAS SPECS BYPASSED THE SCANNER ENTIRELY.
+> `"utils": "npm:chalk-tempalte@1.0.0"` installs the target while every check read the manifest
+> KEY. Reproduced before/after: a fixture with two known-malicious feed packages behind aliases
+> scanned {critical: 0}; it now reports 3 critical. On the guard path `npm install
+> x@npm:<malware>` returned specs=[] because parseSpecToken split at the LAST "@", landed on the
+> alias target's own version, failed the registry-name regex and dropped the spec silently. Both
+> paths fixed by resolving the alias to its target. This was a live, trivially attacker-
+> controllable false negative in a public security tool, readable in the published source.
+>
+> TWO ERRORS IN MY OWN PREVIOUS COMMIT, both caught by the judges, both now fixed:
+> 1. The osaDistance doc comment claimed "veim" -> viem was a true positive of
+> TYPOSQUAT_LEVENSHTEIN. Measured: veim is QUIET, because viem is not in POPULAR_PACKAGES. That
+> comment was the public justification for lowering the ceiling, and it was false.
+> 2. The TYPOSQUAT_ALLOWLIST comment argued against adding viem to POPULAR_PACKAGES because it
+> would flag vuex and timm "at distance 2" - reasoning from the 2-edit rule that the same commit
+> had just replaced. Both rewritten to claims that measurement supports.
+>
+> SHIPPED: alias resolution (both paths); typosquat target floor 4 -> 5 (57 -> 29 measured FPs on
+> 29,687 real names, curated true positives unchanged); TYPOSQUAT_SIMILAR_TO_DEP hardened (length
+> floor, osaDistance, one-sided known-good guard, one finding per pair) taking it from 5.0% of
+> 939 real manifests to under 1% while ADDING transposition recall; policy allowlist extended to
+> that rule (it previously had no per-package escape at all); install-guard blocking demoted to a
+> deny-list with only DEP_INTERNAL_NAME_PUBLIC warn-only.
+>
+> REJECTED AFTER MEASUREMENT, do not retry without new data:
+> - Demoting TYPOSQUAT_LEVENSHTEIN to warn-only in the guard. Measured to lose 10 real blocks
+> (lodahs, expresss, crossenv, cros-env, 1odash, l0dash, nodemai1er, reqeust, axois, raect),
+> because checkSpec never consults patterns.ts - the heuristic is the guard's ONLY view of those
+> curated names. Wiring patterns.ts into checkSpec is the prerequisite for revisiting this.
+> - Two-sided known-good suppression on the pair rule. Drops 11 of 14 true positives; the
+> mutation proof for this is in the suite.
+> - Digit-edit suppression on the pair rule. Publishes the recipe "append a digit to a
+> non-popular dependency name"; 62 of 770 npm feed names end in a digit.
+> - Severity high -> medium on the pair rule. Left at high: it is the rule's only unique
+> territory (babelcli+babel-cli produces no other finding). Needs Emre.
+> - Entropy metric fix. src/entropy.ts iterates code points, so the metric is unbounded and the
+> 6.0/5.7 thresholds are calibrated against a byte range the code never computes. Fixing the
+> metric without re-deriving both thresholds is a blind severity change on the rule that exists
+> to catch obfuscated payloads. Needs its own corpus pass.
+>
+> MUTATION-PROVED (the part CI cannot do): revert osaDistance in the pair rule -> 2 tests red;
+> make the pair guard two-sided -> 4 tests red; revert alias resolution -> 1 test red. All
+> restored green. Self-scan of this repo: 0 critical, 0 typosquat findings.
+>
+> STILL OPEN FOR EMRE (documented, deliberately not shipped):
+> 1. A 13-item precision sweep of src/patterns.ts, measured with reproductions. The worst:
+> SHAI_HULUD_WORM makes the literal string "npm publish" a CRITICAL verdict in any file, so every
+> repo with a release script is critical on sight; GHOSTSOCKS_SOCKS5 fires on the bare word
+> SOCKS5; the MALICIOUS_PACKAGE_PATTERNS scoped catch-all matches 94.3% of ALL scoped packages on
+> the `scg npm` path. That last one must NOT be deleted outright - 85 curated malicious scoped
+> names are matched ONLY by it, so npm-scanner.ts needs a bundled-feed lookup wired in first.
+> 2. Removing the six DEP_INTERNAL_NAME_PUBLIC suffix patterns requires adding BARE feed entries
+> for @convera/ui-shared and @tc-core/campus-service first; they exist only as version pins, so
+> removing the suffixes silences them completely on every path.
+> 3. A pinned-corpus regression harness. Every defect found across both rounds was a rule whose
+> coverage was asserted on one code path and refuted on another.
+
+> Note (2026-07-29, claude-opus-5, second pass): Emre reviewed the threat-intel PR and asked for
+> BOTH open decisions to be fixed on the same branch before merge. Done. A four-agent
+> investigation plus a three-lens adversarial judge panel ran first; the headline finding is that
+> the "viem false positive" was not a one-off.
+>
+> MEASURED SCOPE OF THE FP: a 27,140-name corpus of real npm packages was run through the actual
+> heuristic. 321 legitimate packages were flagged, and the rate RISES with popularity (2.37% above
+> 10M weekly downloads). acorn (237M/wk), preact, cypress, redux, enquirer, gaxios, globby, jose,
+> mime, util, knex and viem were all reported as typosquats, which in `guard` is a hard install
+> block. Against the repo's own 653 unscoped known-malicious names the rule caught 2 (rimarf,
+> yarsg) - roughly 1:160 signal to noise. Both of those are ALSO already caught by exact name in
+> patterns.ts and the feed, so the rule's unique recall against known malware was ZERO. That is
+> what made tightening safe: there was no measured detection to lose.
+>
+> FIX: ceiling is now one Optimal-String-Alignment edit. OSA counts an adjacent transposition as
+> 1, and every real squat in this project's threat data is a transposition (rimarf, yarsg, lodahs,
+> veim) which plain Levenshtein scores 2 - so the ceiling could drop from 2 to 1 without losing
+> one of them. viem/vite is OSA 2, so viem clears structurally with no allowlist entry.
+>
+> THREE PROPOSALS WERE REJECTED after the judge panel, worth recording so they are not retried:
+> 1. Same-first-character predicate. Cuts ~24 more FPs but makes the rule structurally unable to
+> catch 1odash / l0dash, which patterns.ts curates by hand, and on a public repo it is a
+> documented one-character bypass. Two of three lenses rejected it independently.
+> 2. Adding viem to POPULAR_PACKAGES. That array doubles as the target list, so exempting viem
+> would newly flag the legitimate vuex (1.7M/wk) and timm (2.0M/wk). The allowlist is a SEPARATE
+> additive set for this reason; the POPULAR_PACKAGES membership term stays in the guard because 17
+> entries in that array collide with each other at distance 2.
+> 3. Applying the allowlist to TYPOSQUAT_SIMILAR_TO_DEP. Left alone deliberately - see the open
+> item below.
+>
+> ALSO FIXED, found during the investigation and not in the original ask: `--limit abc` parsed to
+> NaN, which disabled the cap and limit guards, imported ZERO IOCs and exited 0 reporting success.
+> A silent false negative in a threat-feed importer. All four numeric CLI options now reject
+> non-positive-integers.
+>
+> VERIFIED: mutation-proved by reverting the ceiling to <= 2 and watching three new tests go red,
+> then restoring. Self-scan of this repo went from 2 typosquat findings (pathe conf 0.85, obug
+> conf 0.65 - both registry-verified legitimate) to 0. npm run build green. Ran only the affected
+> suites (dependency-risk-analyzer, install-guard, campaigns, policy-engine, feed-import): 351
+> pass. Full suite left to CI.
+>
+> STILL OPEN, needs Emre - deliberately NOT fixed here:
+> 1. TYPOSQUAT_SIMILAR_TO_DEP is a second, parallel FP generator. It fires on legitimate pairs in
+> one manifest (vue+vuex, path+pathe, color+colors, mysql+mysql2, uuid+ulid), has no length floor,
+> never consults any allowlist, and has NO suppression path even via a policy file
+> (policy-engine.ts gates allowlist.packages on TYPOSQUAT_LEVENSHTEIN and DEP_INTERNAL_NAME_PUBLIC
+> only). It was left untouched because the obvious two-sided fix breaks the rule's highest-value
+> case - a squat sitting in the manifest next to the package it imitates - and the existing
+> expres+express test encodes exactly that. It needs its own corpus measurement.
+> 2. install-guard blocks on ANY finding (`findings.length > 0`) with no policy allowlist plumbed
+> in, so a 0.65-confidence heuristic carries the same blocking authority as a 1.0-confidence feed
+> match, escapable only with --force. That is the mechanism by which a false positive gets the
+> tool switched off.
+
+> Note (2026-07-29, claude-opus-5): Scheduled daily threat-intel run. No version bump; this is
+> a PR for Emre to review and release.
+>
+> IMPORTER: 250 package IOCs added from the GitHub Advisory Database (CWE-506, 120 OSV-corroborated).
+> 18,368 advisories fetched over 184 pages - the page cap is 200, so the window is close to the
+> FATAL "page cap reached" ceiling and the next run may need --since/--until slicing. 29,024 more
+> entries stayed behind --limit 250 (fine: they remain in the --days 14 window for later runs).
+> Skipped 30: 7 unmappable-version-range, 22 unsafe-package-name, 1 withdrawn.
+>
+> MANUAL ENRICHMENT (the part the advisory databases never publish): two campaigns, 35 non-package
+> indicators plus 23 package names.
+> - NeoShadow (Aikido, Jan 2026; packages corroborated by o3.security MAL-2026-334). Atomic IOCs
+>   are Aikido-only, so they carry confidence 0.85 and are commented single-source.
+> - SANDWORM_MODE (Socket + OX Security, Feb 2026). Both vendors publish the same 19 packages and
+>   the workers.dev C2; the two secondary apexes are Socket-only at 0.85.
+>
+> DISCIPLINE NOTES, three judgement calls worth recording:
+> 1. All 23 package names were verified against the npm registry before being blocked by bare name.
+> Every one returns a "security holding package" placeholder, i.e. npm removed the malware and no
+> legitimate release history exists under those names. The unscoped `supabase-js` is the squat; the
+> real package is the scoped `@supabase/supabase-js` and is not matched.
+> 2. The NeoShadow Ethereum address went into the FEED as type:"url" (0x-prefixed), NOT into
+> KNOWN_C2_WALLETS. That collection holds only Tron and Aptos addresses by design - the feed's
+> structural url floor is what covers EVM. I had it in the wrong collection first; the convention
+> is documented in the url-floor comment in threat-intel.ts.
+> 3. Socket's stage-2 AES key, IV and auth tag were deliberately NOT ingested into
+> KNOWN_MALICIOUS_HASHES. They are decryption material, not file digests, and a key in the hash map
+> would misreport as "this file is malware".
+>
+> NOT ADDED: a SHA-256 (46faab8a...) that a search snippet attributed to the OX Security worm
+> write-up. Fetching the article directly returned no hashes at all, so the snippet is unconfirmed
+> and inventing it would violate the never-invent-indicators rule. Left out on purpose.
+>
+> ONE PRE-EXISTING FALSE POSITIVE FOUND, not caused by this change and not fixed here: the install
+> guard blocks the legitimate `viem`, because the generic Levenshtein heuristic puts it 2 edits from
+> `vite` and `viem` is absent from POPULAR_PACKAGES in dependency-risk-analyzer.ts. My first test
+> asserted `viem` was unblocked and failed; the assertion was wrong, not the code. The test now
+> asserts the meaningful invariant (viem never earns a MALICIOUS_DEPENDENCY/THREAT_INTEL_MATCH
+> verdict) and documents why it is flagged. Adding `viem` to POPULAR_PACKAGES is a real candidate
+> fix but is out of scope for a threat-intel run - it needs Emre's call.
+>
+> Verified: npm run build green (check:aahp + check:feed + check:handoff + tsc). Ran only the
+> suites covering the change - campaigns, ioc-blocklist, feed, threat-intel, feed-import,
+> install-guard, dependency-risk-analyzer, npm-scanner, new-patterns, scanner: 438 pass. Full
+> suite deliberately not run locally; CI on the PR is the authoritative verdict.
+
 > Note (2026-07-28, claude-opus-4-8): Post-release review of v5.20.2 (external, GPT-5.6-Sol)
 > found two real defects. Both confirmed by measurement, both fixed here. No republish: the
 > published package is correct.

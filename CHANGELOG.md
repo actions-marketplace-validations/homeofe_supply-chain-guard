@@ -7,8 +7,104 @@ top; release tags trigger the CI publish pipeline (npm via OIDC + GitHub Release
 
 ## [Unreleased]
 
+## [5.21.0] - 2026-07-29
+
+### Added
+
+- Daily threat-intel import (2026-07-29): 250 malware package IOCs from the GitHub Advisory
+  Database (CWE-506), corroborated against OSV.dev, appended to the bundled feed.
+- **NeoShadow npm typosquats (Aikido, January 2026).** Four Windows-targeting typosquats
+  (`viem-js`, `cyrpto`, `tailwin`, `supabase-js`) published by npm account `cjh97123`, running
+  their payload through MSBuild and resolving the live C2 from an Ethereum contract. Adds the
+  C2 domain `metrics-flow[.]com`, fallback C2 IP `80[.]78[.]22[.]206`, the `analytics.node`
+  backdoor SHA-256, and the Ethereum resolver contract. All four names are npm security-holding
+  placeholders with no legitimate release history, so they are blocked by name; the typosquat
+  targets (`viem`, `tailwindcss`, `@supabase/supabase-js`) are explicitly not matched.
+- **SANDWORM_MODE / "Echoes of Shai-Hulud" npm worm (Socket + OX Security, February 2026).**
+  Token-stealing worm that injects malicious MCP servers into Claude Code, Cursor and VS Code
+  and detonates 48 hours after install. Adds 19 malicious package names, the C2 subdomain
+  `pkg-metrics[.]official334[.]workers[.]dev`, two secondary C2 apexes, the stage-2 payload
+  SHA-256, and the attacker accounts `official334`, `javaorg` and `ci-quality`. Only the
+  specific attacker subdomain is listed, never the shared `workers[.]dev` apex.
+
 ### Fixed
 
+- **npm alias specs bypassed the scanner completely.** A dependency written as
+  `"utils": "npm:chalk-tempalte@1.0.0"` installs the aliased TARGET, but every check read
+  the manifest KEY, which is arbitrary text chosen by whoever wrote the file. A
+  known-malicious package hidden this way scanned clean (0 critical findings), and
+  `npm install x@npm:<malware>` was dropped before any check ran, because the spec failed to
+  parse and was discarded. Alias specs are now resolved to the installed package on both the
+  scan path and the install guard, and the finding names the alias so the offending manifest
+  line is easy to locate. A legitimate alias such as `npm:lodash@4.17.21` stays clean.
+
+- **The install guard treated a name-shape guess as seriously as a malware match.** It
+  blocked on ANY finding, so `DEP_INTERNAL_NAME_PUBLIC` - which fires on the shape of a
+  scoped name (`@scope/*-utils`, `-api`, `-core`, ...) and matches around 1.7% of all real
+  scoped packages, including `@babel/helper-plugin-utils` and `@vue/compiler-core` - blocked
+  installs at critical with only `--force` as an escape. That rule is now reported as a
+  warning and the install proceeds. Blocking authority is a deny-list, so every exact-match
+  verdict (threat-feed IOC, known-bad version) still blocks, as does `TYPOSQUAT_LEVENSHTEIN`:
+  the guard does not consult `patterns.ts`, so for curated squats such as `lodahs`,
+  `crossenv`, `cros-env`, `1odash` and `expresss` that rule is its only view of them.
+  `InstallCommandAnalysis` gains `warned`, and each verdict gains `blocking` and `warnings`;
+  `findings` still carries everything.
+
+- **`TYPOSQUAT_SIMILAR_TO_DEP` fired on ordinary dependency pairs.** Measured across 939 real
+  manifests it hit 5.0% of them (8.1% of repository roots), and every colliding pair was a
+  legitimate co-install: `preact`+`react`, `vue`+`vuex`, `path`+`pathe`, `color`+`colors`,
+  `mysql`+`mysql2`, `uuid`+`ulid`. It now requires both names to be at least 4 characters,
+  skips the pair when the reported side is a known-good package, and reports a pair once
+  instead of once per side. The known-good test is deliberately one-sided so a squat sitting
+  next to the package it imitates (`expres`+`express`) still reports. Switching it to the
+  same transposition-aware distance as its sibling also ADDS recall: `lodahs`+`lodash`,
+  `axois`+`axios`, `raect`+`react` and `rimarf`+`rimraf` were previously missed. This narrows
+  a noisy rule; it does not eliminate the class, since one-letter differences between two
+  real packages remain inherently ambiguous.
+
+- **`TYPOSQUAT_SIMILAR_TO_DEP` could not be suppressed per package.** `allowlist.packages` in
+  a policy file only covered two rules, so a project depending on both `vue` and `vuex` had
+  to disable the rule outright. Allowlisting either named package now suppresses the pair.
+
+- The typosquat target floor moved from 4 characters to 5. Four-letter targets (`path`,
+  `jest`, `cors`, `sass`, `vite`, `uuid`) produced roughly half the remaining false
+  positives, because almost any short name is one edit from them; measured over 29,687 real
+  published names this halves them with the curated true-positive set unchanged.
+
+- **The typosquat heuristic flagged hundreds of legitimate packages.**
+  `TYPOSQUAT_LEVENSHTEIN` accepted two plain Levenshtein edits against a list of 92 popular
+  names. Measured against a 27,140-name corpus of real npm packages, that flagged **321
+  legitimate packages**, and the rate rose with popularity (2.37% of packages above 10M
+  weekly downloads): `acorn`, `preact`, `cypress`, `redux`, `viem`, `knex`, `globby`, `jose`,
+  `mime`, `util` and `enquirer` were all reported as typosquats. In `guard` that is a hard
+  install block. The scanner also flagged two of its own dependencies (`pathe`, `obug`), and
+  told users of `color` "Did you mean `colors`?", recommending the package its author
+  sabotaged in January 2022.
+  The ceiling is now **one transposition-aware edit** (Optimal String Alignment). Adjacent
+  transpositions are the shape every real squat in this project's threat data takes
+  (`rimarf`, `yarsg`, `lodahs`, `veim`), and plain Levenshtein scores those as 2, so
+  transposition awareness is what lets the ceiling drop without losing any of them. Leading
+  homoglyph squats (`1odash`, `l0dash`) are still caught: no same-first-character rule was
+  added, because this repo curates exactly those names in `patterns.ts` and on a public repo
+  such a rule would be a documented one-character bypass. A small allowlist covers the
+  legitimate names that genuinely sit one edit away (`pathe`, `color`, `nuxt`, `preact`,
+  `gaxios`, `enquirer` and others), each registry-verified on 2026-07-29. The allowlist gates
+  this one rule only: feed IOC matches, the known-bad-version blocklist and every scanner
+  pattern run on paths that never consult it.
+  Findings now also name the *closest* popular package rather than the first array match, so
+  the "Did you mean" text is no longer array-order dependent. The exported `levenshtein`
+  helper is unchanged.
+- **The importer's page cap was one busy fortnight from freezing the feed.** The 2026-07-29
+  run needed 184 of the 200 allowed pages. Hitting the cap is fatal and writes nothing, so a
+  burst window would have imported zero IOCs rather than fewer. The default is now 750, held
+  in a single `DEFAULT_MAX_PAGES` constant instead of four separate literals. This does not
+  change which IOCs a successful run imports: the fetch is newest-first and `--limit` still
+  takes the newest 250 either way. It only stops burst days from aborting to zero.
+- **`--limit abc` silently imported nothing and exited 0.** Numeric CLI options were parsed
+  with bare `Number()`, and `NaN` disabled every guard it reached: nothing reported as capped
+  and `slice(0, NaN)` returned an empty array, so the run claimed success while importing zero
+  IOCs. `--days`, `--limit`, `--max-pages` and `--timeout` now reject anything that is not a
+  positive integer.
 - `package-lock.json` is now covered by the version-sync gate. The release bump edits
   version strings in place, but npm writes the lockfile's own `version` fields at install
   time, so the lockfile trailed a release behind (5.20.0 at the v5.20.1 tag, 5.20.1 at the
@@ -2099,7 +2195,8 @@ A single threat actor (claiming "TeamPCP") compromised both the Checkmarx KICS D
 ## [1.0.0] - 2026-03-19
 - Initial release: GlassWorm detection, npm scanning, Solana C2 monitoring
 
-[Unreleased]: https://github.com/homeofe/supply-chain-guard/compare/v5.20.2...HEAD
+[Unreleased]: https://github.com/homeofe/supply-chain-guard/compare/v5.21.0...HEAD
+[5.21.0]: https://github.com/homeofe/supply-chain-guard/releases/tag/v5.21.0
 [5.20.2]: https://github.com/homeofe/supply-chain-guard/releases/tag/v5.20.2
 [5.20.1]: https://github.com/homeofe/supply-chain-guard/releases/tag/v5.20.1
 [5.20.0]: https://github.com/homeofe/supply-chain-guard/releases/tag/v5.20.0
