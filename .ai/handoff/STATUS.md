@@ -1,3 +1,73 @@
+> Note (2026-08-01, claude-opus-5): Gitignored `docs/reviews/`, a local-only folder for
+> external model cross-reviews (mirrors elvatis/ideabase `docs/reviews/`). Two reasons it
+> must be ignored rather than merely untracked: this repo is PUBLIC and its hard rules
+> forbid AI/tool attribution in published artefacts, and the daily job commits with
+> `git add -A`, so anything left there would be swept into a public commit by the next
+> 07:02 run. Same reasoning as `docs/superpowers/`. Review outputs are working material,
+> not the record: decisions still go to STATUS.md, cross-repo items to elvatis/ideabase.
+>
+> Context - three findings are out for cross-review (prompt in docs/reviews/, not committed):
+> (1) PR #100 registers the PointBlank PyPI RAT as bare `gcli-control`, which is the npm
+> namespace, so a poetry.lock/requirements.txt pinning it yields ZERO findings while a
+> package.json dependency of that name is flagged critical - the detection is inverted, and
+> `gcli-control` is the only new PyPI IOC still live on the registry. Fix is `pypi:` +
+> regenerate feed.json + a scanner-level test; the PR's tests assert against the
+> PYPI_TYPOSQUAT_PATTERNS constant and never call scan(), which is how it passed CI. The same
+> class is already live on main: `frint` is registered bare but is a PyPI name, and `frint`
+> is a real npm package (~89 versions since 2016).
+> (2) scanner.ts builds dependency candidates with `version: undefined`, and matchBareNpmIOC
+> needs exact version equality, so of 2,095 bundled package IOCs only 620 bare npm names fire
+> on the primary path; 1,039 version-pinned npm entries cannot fire from an ordinary
+> package.json dependency. The npm ALIAS form is matched while the ordinary declaration is
+> not, and the package-lock.json path never consults the feed at all.
+> (3) THE 2026-07-28 "BACKLOG DECISION, MADE - do not re-litigate" RESTS ON A FALSE PREMISE.
+> Its load-bearing claim that the main scan path never consults feed package entries for npm
+> is wrong, and was wrong when written: the wiring landed in v5.11.0 on 2026-07-09, 19 days
+> earlier, via checkMaliciousDependencyNames -> matchBareNpmIOC (the analysis searched for
+> matchPackageIOC, the wrong function for the npm namespace). Verified by fixture. Separately,
+> PR #100's claim that the backlog "refills faster than a 250/run cap drains it" is
+> contradicted by the record: 29,246 -> 29,024 -> 28,763 -> 28,662 -> 28,235, shrinking ~253
+> per run. Both that note and the 07-28 note called a trend from two points and reached
+> opposite conclusions. A free falsifiable test lands on the 2026-08-05 run, when the 21 July
+> burst (11,520 advisories) leaves the 14-day window. Do not act on either backlog claim until
+> the wiring in (2) is fixed - importing more version-pinned entries into a path that cannot
+> fire them buys nothing.
+
+> Note (2026-08-01, threat-intel, unreleased): Daily threat-intel update. No version
+> bump - the version belongs to the release Emre cuts.
+>
+> IMPORT: `npm run feed:import` added 250 package IOCs (GitHub Advisory Database CWE-506,
+> corroborated against OSV.dev) for the window from 2026-07-18. 18,649 advisories over
+> 187 pages, under the 200-page cap, so no window slicing and no truncation. Skipped 30:
+> 7 unmappable-version-range (bounded ranges the scanner cannot express), 22
+> unsafe-package-name, 1 withdrawn. None were forced in by hand.
+>
+> ENRICHMENT: two campaigns the advisory databases cannot supply atomic indicators for.
+> Joyfill npm compromise / DEV#POPPER (Socket + StepSecurity, 2026-07-28) was only
+> PARTIALLY covered - the databases published 2 of 6 malicious releases. Added the
+> remaining four @joyfill/components and @joyfill/layouts 2773 betas as version pins
+> (both packages are legitimate and still maintained), 4 stage-3/4 C2 IPs, 15 payload
+> SHA-256 hashes and 7 blockchain C2 resolver addresses. Socket's PolinRider attribution
+> is corroborated independently: the wave re-uses two Tron tier-2 wallets already pinned
+> for ViteVenom/ChainVeil. Every hash was shape-checked and the extraction was verified
+> against an exact-string search before ingest. PointBlank PyPI RAT (Xygeni,
+> 2026-07-21..31): gcli-control blocked by name at feed confidence 0.85, single-source.
+>
+> DELIBERATE NON-INGESTS: api.trongrid[.]io, fullnode.mainnet.aptoslabs[.]com,
+> bsc-dataseed.binance[.]org, bsc-rpc.publicnode[.]com, ip-api[.]com and npoint[.]io are
+> shared public infrastructure that the two loaders abuse rather than own. Blocking any
+> of them would flag legitimate web3 and developer projects, so they are excluded and
+> regression tests assert they stay clean. The generic "gcli" import package name is
+> excluded for the same reason. Xygeni published no npoint[.]io bin id, so there is no
+> campaign-specific dead-drop path to ingest.
+>
+> OPEN FOR EMRE: the importer backlog is structural, not transient. It was 28,662 on
+> 2026-07-31 and is 28,235 after this run - a 250/run cap against a 14-day window that
+> refills faster than it drains, so the oldest slice ages out unimported and is
+> unreachable by any later run. That is a silent false negative by design, and raising
+> --limit is explicitly not the fix (it would push a machine-generated thousand-entry
+> diff into a public repo). This needs a policy decision, not another daily run.
+>
 > Note (2026-07-31, v5.23.4): Issue #97 replaces the unconditional
 > GHA_ARTIFACT_DOWNLOAD action-name match with a fail-closed structural trust proof.
 > A download is clean only when trusted triggers, stable upload/download refs, matching
