@@ -7,6 +7,39 @@ top; release tags trigger the CI publish pipeline (npm via OIDC + GitHub Release
 
 ## [Unreleased]
 
+### Added
+
+- Threat feed: 358 malicious-package IOCs imported from the GitHub Advisory Database
+  with OSV.dev corroboration. 250 are this run's standard batch; the other 108 are an
+  explicit `2026-07-26..2026-07-28` slice, imported because the importer's undrainable
+  check flagged them as about to age out of the `--days 14` window before any future
+  capped run could reach them. The bulk continues the dependency-confusion wave against
+  Tinkoff/T-Bank internal namespaces (`bigops-*`, `dolyame-boxy-*`, `bnpl-blocks-*`,
+  `statist-browser-typed-client-*`), which publishes with inflated version markers such
+  as `kepler@5.999.999`, alongside an AI-agent impersonation cluster
+  (`@agenthub-ai/agent`, `claw-subagent-service`, `llm-interceptor`), a fintech
+  `@scope/checkout` cluster, and three PyPI crypto stealers (`eth-account-wallet`,
+  `solana-sniper-bot`, `uncrypt`).
+- IOC blocklist: `fast-transform-pipeline` (npm) for the Alibaba developer toolchain RAT.
+  The repo already tracked the campaign's GitHub dead-drop repo of the same name, but the
+  npm package it was published as had no IOC, while its other 17 siblings were covered.
+  Bare name, no version pin: the source publishes no versions. Single-source (Socket),
+  so confidence 0.85.
+- IOC blocklist: SHA-256 of the poisoned `keyv-6.0.0.tgz` distribution tarball for the
+  ChainDrop npm worm. `keyv@6.0.0` is already version-pinned, so this adds a second
+  detection path for the same release where the tarball digest is recorded as text.
+  Single-source (Snyk), so confidence 0.85.
+- Threat feed: 2,683 further malicious-package IOCs, a backlog-completion import over the
+  `2026-08-04..2026-08-06` window that drains the remainder of the ChainDrop spike the
+  capped standard batch could not reach. The feed goes from 6,948 to 9,631 entries, and a
+  follow-up dry run reports 0 waiting and 0 undrainable. This closes two scopes that had
+  zero feed coverage before this run: `@hubsync` (27 entries) and `@ornikar` (441), both
+  entirely version-pinned, so the scopes are not blocked wholesale and pinned matches are
+  enforced by the install guard. 129 of the new entries are bare names, every one of which
+  npm has already replaced with a security holding package; 7 are PyPI, carrying the
+  `pypi:` prefix. The 179 unmappable advisories in the window stay excluded by design
+  (150 withdrawn, 22 unsafe package names, 7 bounded version ranges).
+
 ## [5.25.5] - 2026-08-05
 
 ### Fixed
