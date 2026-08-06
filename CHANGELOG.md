@@ -7,6 +7,8 @@ top; release tags trigger the CI publish pipeline (npm via OIDC + GitHub Release
 
 ## [Unreleased]
 
+## [5.25.6] - 2026-08-06
+
 ### Added
 
 - Threat feed: 358 malicious-package IOCs imported from the GitHub Advisory Database
@@ -39,6 +41,16 @@ top; release tags trigger the CI publish pipeline (npm via OIDC + GitHub Release
   npm has already replaced with a security holding package; 7 are PyPI, carrying the
   `pypi:` prefix. The 179 unmappable advisories in the window stay excluded by design
   (150 withdrawn, 22 unsafe package names, 7 bounded version ranges).
+
+### Changed
+
+- Test only: the feed-reachability guard in `collection-reachability.test.ts` now runs with
+  an explicit 30s timeout. It calls the real `matchBareNpmIOC` once per npm entry, and that
+  matcher is a linear scan of the feed, so the guard costs roughly 85 million comparisons.
+  Growing the feed by 46% in this release made it about twice as slow and it exceeded the
+  default 5s timeout on CI. No production code changed. The cost grows with the square of
+  the feed, so the actual fix is to index `matchBareNpmIOC` the way `matchPackageIOC`
+  already is, tracked as T-017.
 
 ## [5.25.5] - 2026-08-05
 
@@ -2922,7 +2934,8 @@ A single threat actor (claiming "TeamPCP") compromised both the Checkmarx KICS D
 ## [1.0.0] - 2026-03-19
 - Initial release: GlassWorm detection, npm scanning, Solana C2 monitoring
 
-[Unreleased]: https://github.com/homeofe/supply-chain-guard/compare/v5.25.5...HEAD
+[Unreleased]: https://github.com/homeofe/supply-chain-guard/compare/v5.25.6...HEAD
+[5.25.6]: https://github.com/homeofe/supply-chain-guard/releases/tag/v5.25.6
 [5.25.5]: https://github.com/homeofe/supply-chain-guard/releases/tag/v5.25.5
 [5.25.4]: https://github.com/homeofe/supply-chain-guard/releases/tag/v5.25.4
 [5.25.3]: https://github.com/homeofe/supply-chain-guard/releases/tag/v5.25.3
