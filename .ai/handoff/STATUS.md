@@ -1,8 +1,96 @@
 # supply-chain-guard: Current State
 
-> Updated 2026-08-07 (v5.25.7 release). This is one current snapshot, not a session log.
+> Updated 2026-08-08 (threat-intel sweep). This is one current snapshot, not a session log.
 > Historical detail belongs in CHANGELOG.md, generated LOG.md,
 > LOG-ARCHIVE.md, and git history.
+
+---
+
+## Threat-intel run (2026-08-08, branch threat-intel/2026-08-08)
+
+Model: claude-opus-5. Scheduled daily advisory sweep. No version bump - the
+version belongs to Emre's release. Base: 5f37e55 (main, post-v5.25.7). Repo was
+clean, no open PRs, so no concurrent-writer conflict.
+
+**Importer.** 250 new package IOCs (230 npm, 20 PyPI) in one standard pass over
+the rolling 14-day window. 4,498 advisories fetched over 45 pages, 182
+corroborated by OSV. The page cap was NOT hit, so no window slicing and no
+`--allow-truncated`. 49 mappable entries remain behind `--limit 250` with
+`undrainable: 0`, meaning the next scheduled run reaches all of them before they
+age out - unlike 2026-08-07, this did not need a second slice pass. 178
+advisories were skipped by design (149 withdrawn, 22 unsafe package name, 7
+unmappable version range); the JSON report carries only counts for those, not
+per-advisory detail, so the reasons cannot be enumerated from a completed run.
+
+**End-of-run drain check.** Skipped deliberately this run: the remainder is 49
+with `undrainable: 0`, which is the condition the check exists to detect. Re-run
+the check when a run reports a non-zero `undrainable`.
+
+**Hand-added enrichment.** Two campaigns, 13 non-package indicators:
+
+- *ChainDrop npm worm, second wave.* Microsoft and Datadog published the resolver
+  internals after the initial 2026-08-04 write-ups the previous run ingested. Two
+  sibling C2 routers (`pypi-get[.]com`, `js-mirror[.]com`), one earlier rotation
+  target (`awqhnjewqjkl[.]icu`, single-source), four later-wave SHA-256 hashes,
+  and two GitHub exfiltration-repo marker names.
+- *Alibaba developer toolchain RAT, Corgea follow-up.* The live
+  `raw.githubusercontent[.]com` config dead-drop path, and `node-data-utils@1.0.1`
+  as a nineteenth staging package. Both single-source, confidence 0.85.
+
+**Hash verification.** Datadog listed five hashes. Four round-tripped and were
+independently re-confirmed by exact-string search (op-c.net's ChainDrop IOC list,
+Socket's Miasma write-up, SlowMist, Aikido/Snyk). The fifth,
+`619c56acf572df75b6004a6fc013c80900316a76099b241d64312da3a44f10b4`, appears in no
+other source and is absent from op-c.net's otherwise-identical list, which is the
+signature of a WebFetch transcription error rather than a real indicator. It was
+NOT ingested. Anyone revisiting this should read Datadog's IOC table directly
+rather than trusting a fetched rendering.
+
+**Deliberately not ingested.**
+
+- The public Ethereum RPC providers the ChainDrop resolver calls
+  (`eth-mainnet.nodereal[.]io`, `go.getblock[.]io`, `eth.llamarpc[.]com`). Shared
+  legitimate infrastructure: blocking them flags every Ethereum repository. A
+  negative test pins this.
+- The npm publisher handle `ch4ce` behind five of the Alibaba RAT packages.
+  Socket states the origin is unconfirmed - account takeover or insider - so it
+  may be a victim account. All five of its packages are already covered by name,
+  so blocking the handle adds no detection and only adds victim-blocking risk.
+- The two ChainDrop taunt strings (`Shai-Hulud: Here We Go Again` and the long
+  `IfYouBlockThisAPIKey...` marker). They are payload description text, not
+  locators; if they are wanted, they belong in `patterns.ts` as campaign rules,
+  which is a considered change rather than a sweep addition.
+
+**Unrelated fix carried in the same PR.** GHSA-2v37-7h3g-55p8 against `nanoid`
+was published after v5.25.7 and turns `npm audit --audit-level=high` red on
+EVERY branch, so the first CI run on this PR failed on it rather than on
+anything in the sweep. Fixed with a lockfile-only bump to 3.3.18 (dev-only
+transitive: vitest -> vite -> postcss; the published package still ships
+`commander` as its only runtime dependency). If a dependabot PR appears for the
+same advisory, close it explicitly - it is already resolved here.
+
+**A SECOND Windows-only test gap exists, alongside the known `zip` one.** Two
+`IOC_KNOWN_C2_DOMAIN` tests fail on this box on unmodified `main` - the Phantom
+Bot `87e0bbc636999b.lhr.life` test and the GlassWASM `dodod[.]lat` stage-2
+delivery host test. **CI settled it: both pass on Linux** (PR #126 run, 2,666
+passing), so this is the environment, not a defect in v5.25.7. Recorded here so
+the next run does not re-investigate it: calling `checkIOCBlocklist()` directly
+on the same content returns the finding correctly, the loss is somewhere in the
+`scan()` pipeline under Windows, and repeated runs over one fixture do not
+always produce identical findings. Treat these two the way the `zip` failures
+are already treated.
+
+**CI caught something a green local build could not.** The two ChainDrop
+exfiltration-repo markers were first added as `type: "url"` feed entries as well
+as blocklist entries. `isValidFeedIOC` rejects them, correctly - a bare
+repository name is not URL-shaped, and `IOC_VALUE_SHAPES.url` is what stops a
+remote feed injecting arbitrary strings. `npm run build` is green on this
+because no prebuild gate executes the validator; it surfaced only in
+`issue-54-hardening.test.ts`. They are now blocklist-only, which costs no
+detection since `KNOWN_DEAD_DROPS` is substring-matched. **Add
+`src/__tests__/issue-54-hardening.test.ts` to the targeted suite list whenever a
+run hand-adds a bundled-feed entry** - the existing list in the job file does
+not include it, and `feed.test.ts` does not cover the value-shape contract.
 
 ---
 
