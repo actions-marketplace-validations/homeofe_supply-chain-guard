@@ -1,8 +1,76 @@
 # supply-chain-guard: Current State
 
-> Updated 2026-08-08 (threat-intel sweep). This is one current snapshot, not a session log.
+> Updated 2026-08-09 (threat-intel sweep). This is one current snapshot, not a session log.
 > Historical detail belongs in CHANGELOG.md, generated LOG.md,
 > LOG-ARCHIVE.md, and git history.
+
+---
+
+## Threat-intel run (2026-08-09, PR open, no version bump)
+
+Model: claude-opus-5. Scheduled daily advisory sweep. Base: 7afaedc (main,
+post-v5.25.8). Repo was clean with zero open PRs, so no concurrent-writer
+conflict. No version bump on this branch by design: Emre cuts the release.
+
+**Importer.** 64 new package IOCs (62 npm, 2 PyPI) in one standard pass over the
+rolling 14-day window. 4,492 advisories fetched over 45 pages, 16 corroborated by
+OSV. The page cap was NOT hit, so no window slicing and no `--allow-truncated`.
+The `--limit 250` cap was NOT reached either (`remaining: 0`, `undrainable: 0`),
+so unlike the last two runs nothing is left waiting. 158 advisories were skipped
+by design (149 withdrawn, 7 unmappable version range, 2 unsafe package name); the
+JSON report carries only counts for those, not per-advisory detail.
+
+**Manual enrichment (STEP 1b).** The headline campaign of the week, the
+keyv/cacheable ChainDrop worm, needed nothing: the 2026-08-07 and 2026-08-08 runs
+had already ingested its hashes, C2, wallet and package pins, including the
+judgement calls (cloud metadata IPs excluded, the `file-entry-cache@11.1.7`
+vendor discrepancy resolved against the registry). Three genuine gaps were filled
+instead:
+
+- **Flooding Dropper / WEL1DROPPER** (2026-08-07, ~850 packages). The feed already
+  held 78 `bigops` and 134 `dolyame` package entries from the advisory databases,
+  but none of the delivery infrastructure. Added 8 Cloudflare Worker sub-hosts, the
+  DNS-fallback host `dl[.]wel1[.]ru`, and 2 payload hashes.
+- **axios / UNC1069** (2026-03-31). Versions were already pinned; the C2, its
+  resolver IP and the 3 implant hashes were not.
+- **spellcheckpy / spellcheckerpy** (2026-01-20). Never ingested at all. Backfilled
+  as bare-name PyPI blocks plus host and IP. Single-source, confidence 0.85.
+
+**Deliberate non-additions.** The `workers[.]dev` apex; `nexus[.]tcsbank[.]ru`,
+`repo-linux[.]tcsbank[.]ru` and `alertmanager[.]cloudpayments[.]ru` (real Russian
+financial-services hosts that OpenSourceMalware embeds with an explicitly UNCLEAR
+role - health check, decoy, or compromised third party); the Cloudflare anycast
+address `104[.]21[.]35[.]216` published for the ChainDrop router; and the hijacked
+axios maintainer account, who is a victim. `dl[.]wel1[.]ru` is listed once rather
+than as five rows because domain matching is an unanchored substring test, so one
+entry covers the published platform subdomains without each double-reporting.
+
+**`nrwise` resolved - do NOT add it, and do not re-open this next run.** Aikido
+lists a second attacker-controlled account, `nrwise` (`nrwise[@]proton[.]me`),
+alongside the hijacked axios maintainer. It was initially left out as an open
+question; it is now settled as a deliberate non-addition, on three independent
+grounds:
+
+- *The matcher makes it worthless.* `KNOWN_MALICIOUS_GITHUB_ACCOUNTS` is matched
+  as `github\.com/<account>\b`, so it only ever fires on a github.com URL in
+  scanned content. `github[.]com/nrwise` has ZERO public repositories, so no such
+  URL exists to be referenced. Detection value is exactly zero, not merely small.
+- *The account points away from the attacker.* It has been dormant since 2013
+  with no public repos and 2 followers. npm and GitHub are separate namespaces, so
+  an identical handle implies no connection; an abandoned 13-year-old account fits
+  an unrelated person who grabbed a short name far better than infrastructure
+  stood up for a March 2026 npm publish. Aikido's context (a proton[.]me address,
+  an npm-publishing attack) indicates their `nrwise` is the npm publisher account.
+  The aged-account-takeover reading cannot be excluded, but it changes nothing:
+  with no public repos there is still nothing to detect.
+- *There is nowhere correct to file an npm handle anyway.* No npm-account
+  collection exists in this codebase - `KNOWN_MALICIOUS_GITHUB_ACCOUNTS` is the
+  only account list. And the three packages involved (`axios@1.14.1`,
+  `axios@0.30.4`, `plain-crypto-js@4.2.1`) are already version-pinned, so the
+  handle would add no coverage. Same reasoning as `ch4ce` in the 2026-08-08 run.
+
+The asymmetry is one-sided: no detection gained, against a real risk of flagging a
+live account belonging to an actual person.
 
 ---
 
