@@ -1,10 +1,75 @@
 # supply-chain-guard: Current State
 
-> Updated 2026-08-09 (v5.25.9 release). This is one current snapshot, not a session log.
+> Updated 2026-08-10 (threat-intel sweep). This is one current snapshot, not a session log.
 > Historical detail belongs in CHANGELOG.md, generated LOG.md,
 > LOG-ARCHIVE.md, and git history.
 
 ---
+
+## Threat-intel run (2026-08-10, PR open, no release)
+
+Model: claude-opus-5. Scheduled daily advisory sweep. Base: 186ff84 (main,
+post-v5.25.9). Repo was clean with zero open PRs and zero open issues, so no
+concurrent-writer conflict; work was done in a `git worktree` under the session
+scratchpad and the shared checkout was left on `main`. No version bump on this
+branch by design: Emre cuts the release.
+
+**Importer.** 2 new package IOCs, both PyPI (`kotanku@0.1.0`,
+`cubesat-upstream-driver@1.0.1`), in one standard pass over the rolling 14-day
+window. 4,014 advisories fetched over 41 pages, both new entries corroborated by
+OSV. The page cap was NOT hit, so no window slicing and no `--allow-truncated`.
+The `--limit 250` cap was NOT reached (`remaining: 0`, `undrainable: 0`), so
+nothing is left waiting. 151 advisories skipped by design (149 withdrawn, 2
+unmappable version range); the JSON report carries only counts for those, not
+per-advisory detail.
+
+**Manual enrichment (STEP 1b).** The cross-reference turned up that TeamPCP was
+only half ingested: the litellm side was covered, the telnyx sibling three days
+later was not, and the campaign's whole March 2026 npm wave was missing. Added
+the non-package indicators (C2 hosts, WAV dead drops, four wheel/`_client.py`
+hashes, the `Argon-DevOps-Mgt` attacker account) plus 58 hijacked npm packages.
+
+**Method note worth keeping: GHSA version ranges are too NARROW.** The first cut
+of this change assumed the opposite. The vendor write-up listed more versions
+than the advisories (`customer-sdk` 1.54.1-1.54.5 vs the advisory's
+1.54.1-1.54.2, `@teale.io/eslint-config` 1.8.9-1.8.16 vs 1.8.9-1.8.10), and that
+was initially read as the fetch padding the list with invented sequential
+numbers. The npm registry settled it the other way: a fabricated version cannot
+carry a real publish timestamp, and every disputed version is present in the
+registry `time` map, published 2026-03-20, since unpublished, while the last
+legitimate release of each package is still live. `@teale.io/eslint-config` has
+70 live versions of 78 ever published, and the 8 unpublished ones are exactly the
+vendor's range.
+
+The pins are therefore generated from three signals: an advisory covers the
+version, OR it was published inside the campaign window and has since been
+unpublished from a package the campaign is known to have hit. That added 27
+versions across 12 packages that GHSA alone would have missed (90 -> 117 pins).
+Registry-derived PRERELEASES are excluded on purpose: the `@emilgroup` packages
+retract beta channels constantly, so "unpublished" carries no signal there and
+one such candidate (`changelog-sdk-node@1.0.1-beta.13`) was dropped.
+
+A 404 on the whole package is NOT evidence against an indicator: seven packages
+here 404, and one of them (`@opengov/form-utils`) has a GHSA advisory. Only 3
+pins now rest on the vendor list alone, and they carry confidence 0.85.
+
+**Open question for Emre (no PR issue opened, per the repo invariant).** The
+ecosystem-prefix defect below survived many green releases even though the trap
+is already written down in CLAUDE.md, so prose is demonstrably not holding it.
+A cheap build gate would: assert in `check:feed` that no key of
+`KNOWN_BAD_PYPI_VERSIONS` appears as a BARE feed value, plus the mirror for
+`KNOWN_BAD_NPM_VERSIONS` and a `pypi:` prefix. Deliberately not added here so
+this change stays reviewable, and because a gate deserves its own mutation
+proof. Worth noting `isValidFeedIOC` is still not wired into any prebuild gate
+either. Not gateable offline: version SETS, which need the registry.
+
+**Defect found and fixed.** Six PyPI compromises had their package IOCs in the
+feed as BARE values, which means the npm namespace. `matchPackageIOC("pypi",
+...)` returned null for them while the npm resolver answered instead. The
+lockfile scan still flagged them through `KNOWN_BAD_PYPI_VERSIONS`, which is
+exactly why this survived: the blocklist masked the feed miss. Mutation-proved
+both directions before and after. See the "Needs a decision" section of the PR
+for the one open question this leaves.
 
 ## Threat-intel run (2026-08-09, merged as #128, shipping in v5.25.9)
 
