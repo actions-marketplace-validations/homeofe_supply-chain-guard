@@ -1,10 +1,85 @@
 # supply-chain-guard: Current State
 
-> Updated 2026-08-13 (release v5.26.1). This is one current snapshot, not a session log.
-> Historical detail belongs in CHANGELOG.md, generated LOG.md,
-> LOG-ARCHIVE.md, and git history.
+> Updated 2026-08-14 (release v5.26.2). This is one current snapshot, not a session
+> log. Historical detail belongs in CHANGELOG.md, generated LOG.md, LOG-ARCHIVE.md,
+> and git history.
 
 ---
+
+## Release v5.26.2 (2026-08-14)
+
+Model: claude-opus-5. Contents: the 2026-08-14 threat-intel sweep, detailed below.
+
+PATCH. The release adds feed data only: no new rule, no pattern-table change, no
+change to what the scanner does. That is the same call as v5.26.1 and the reasoning
+recorded there still applies, `5.x.0` carries anything that changes scanner
+behaviour and threat-intel data ships as a patch.
+
+The sweep was prepared by the scheduled daily job, which never releases. The release
+was cut in the same session on an explicit instruction to decide the open question
+and ship, so the version bump and the data landed in one PR (#142) rather than the
+usual two. One merge, one CI settle, then the tag. Nothing about the tag or publish
+path changed.
+
+## Threat-intel sweep 2026-08-14
+
+Importer: 1,842 advisories fetched over 19 pages, 4,782 mapped to IOCs, 169 new
+entries written, 122 of them OSV-corroborated. 4,549 were already in the feed and 64
+were already covered by a bare-name IOC. Zero skipped, zero unmappable, no page cap
+hit, and nothing left waiting behind `--limit` (169 is under the 250 default), so the
+next run starts from a clean window.
+
+Manual enrichment: none, and that is the notable part of this run. Every campaign the
+vendor sweep surfaced was already fully covered. Checked and confirmed present:
+ChainDrop / keyv (including the `npm-cache[.]com` domain and the `StringListStore`
+contract address), Miasma "Hades" (yesterday's work), Team PCP (the StepSecurity
+2026-08-13 post is a CloudSEK victimology disclosure, 78,330 secrets from 2,186
+organisations, and carries no indicator we lack, `scan[.]aquasecurtiy[.]org`, telnyx
+and the KICS action are all already ingested), and WEL1DROPPER / Flooding Dropper.
+The one WEL1DROPPER detail worth recording: the four DNS-fallback subdomains
+`sdk[.]`, `ext[.]`, `pkg[.]` and `net[.]dl[.]wel1[.]ru` are NOT separate blocklist
+entries, they are covered by the single `dl.wel1.ru` entry, and
+`campaigns.test.ts:4029` exists specifically to prove that. Do not "fix" their
+apparent absence by adding four redundant entries.
+
+### False-positive review of the bare-name blocks
+
+59 of the 169 entries are bare names rather than version pins, which is the shape that
+would hurt if one of them were a real package. Twelve of the riskiest-looking were
+checked against the npm registry (`react-shield`, `source-analyzer`, `root-locator`,
+`path-match-js`, `ts-enum-helper`, `mutex-forge`, `sourceflow-tracker`,
+`finvu-hdfc-sdk`, `blocks-angular`, `index-design-system`, `lab-helper`,
+`nolimit-agent`): every one was created 2026-08-13 and has exactly one published
+version, so none is an established package that a name-level block would break.
+`nolimit-agent` is the one to watch, 12,272 downloads in 30 days off a one-day-old
+single-version package.
+
+### Bare-name blocks: resolved, all 59 stay as names
+
+The open question was whether the bare names under scopes belonging to real
+organisations (`@rocketreach/rr-components`, `@sapappgyver/appgyver-descriptors`,
+`@open-banking/cabinet-providers`, `@stockrepublic/republic-components`,
+`@sourceflow-uk/sourceflow-tracker`, `@hanssoft/baileys`, `@hanssoft/libsignal-node`)
+were hijacked legitimate packages that should have been version-pinned instead.
+
+They were not, and there is a clean registry signal that settles it. All 60 bare names
+in this window were queried against the npm registry: 59 now carry exactly one version,
+`0.0.1-security`, published by the `npm-support` account. That is npm's takedown stub,
+which npm publishes only when it removes a package name in its entirety. The one
+exception, `@dsp-next-gen-ui/needs-review`, carries the stub plus the malicious
+dependency-confusion sentinel `999.99.1` and no legitimate release either.
+
+The marker discriminates, which is the part that makes it usable rather than merely
+suggestive. Run against genuinely hijacked packages as controls, `keyv` (85 versions,
+maintainers `lukechilds`/`jaredwray`), `flat-cache` (52, `jaredwray`) and `axios` (143,
+`jasonsaayman`) are all intact with full version history: npm removed the bad versions
+and left the name with its real owner. A whole-name takedown therefore means the name
+was attacker-owned end to end, and a version pin would be wrong because there is no
+legitimate version left to preserve.
+
+Worth reusing: `0.0.1-security` + `npm-support` as sole maintainer is a positive
+confirmation that a bare-name block is safe, and is cheaper than reasoning about
+whether a scope looks corporate.
 
 ## Release v5.26.1 (2026-08-13)
 
