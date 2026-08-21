@@ -7,6 +7,23 @@ top; release tags trigger the CI publish pipeline (npm via OIDC + GitHub Release
 
 ## [Unreleased]
 
+## [5.28.1] - 2026-08-21
+
+### Added
+
+- **Threat feed: 84 package IOCs imported from the GitHub Advisory Database**
+  (2026-08-15 to 2026-08-21), covering 71 npm, 4 PyPI and 9 crates.io indicators.
+  Notable clusters: the `mcp-server-*` set impersonating well-known Model Context
+  Protocol servers, a dependency-confusion wave against internal fintech scopes
+  (`pfp-forms-*`, `hubert-*`, `bigops-*`), and a `create-react-app-*` typosquat set.
+- **arrayref build-time dropper (crates.io, August 2026): atomic indicators.** A
+  maintainer account was used to publish poisoned `arrayref` 0.3.10, `internment`
+  0.8.7 and `append-only-vec` 0.1.9, each pulling a `proc-macro1` typosquat whose
+  `build.rs` fetched and ran a second stage during `cargo build`. Adds the attacker
+  VPS host, four C2 addresses and the three poisoned `.crate` digests, plus scanner
+  tests covering the version pin, the shared-host apex and the legitimate
+  `proc-macro2` crate as negative cases.
+
 ## [5.28.0] - 2026-08-20
 
 ### Added
@@ -3635,7 +3652,8 @@ A single threat actor (claiming "TeamPCP") compromised both the Checkmarx KICS D
 ## [1.0.0] - 2026-03-19
 - Initial release: GlassWorm detection, npm scanning, Solana C2 monitoring
 
-[Unreleased]: https://github.com/homeofe/supply-chain-guard/compare/v5.28.0...HEAD
+[Unreleased]: https://github.com/homeofe/supply-chain-guard/compare/v5.28.1...HEAD
+[5.28.1]: https://github.com/homeofe/supply-chain-guard/releases/tag/v5.28.1
 [5.28.0]: https://github.com/homeofe/supply-chain-guard/releases/tag/v5.28.0
 [5.27.0]: https://github.com/homeofe/supply-chain-guard/releases/tag/v5.27.0
 [5.26.7]: https://github.com/homeofe/supply-chain-guard/releases/tag/v5.26.7
