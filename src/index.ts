@@ -179,5 +179,8 @@ export type {
   WatchlistAlert,
   SbomDocument,
   SbomComponent,
+  SbomDependency,
+  SbomLicenseEntry,
+  SbomProperty,
   VexStatement,
 } from "./types.js";
