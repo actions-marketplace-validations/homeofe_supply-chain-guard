@@ -1,3 +1,181 @@
+## Independent review of the remaining #220 findings: they reproduced, and they are closed
+
+The handover asked a second reader to contradict the two vacuous-test findings
+that kept #220 unmerged. They held.
+
+1. The mechanism carrying "not assessed" into a published artefact was
+   untested. Deleting the SARIF `slsa` invocation property, the JUnit
+   `slsa-level` / `slsa-not-assessed` properties, the text `NOT ASSESSED:` /
+   `from:` blocks, the zero-coverage caveat sentence, or the GitLab `warn`
+   level left reporter.test.ts, issue-205-zero-coverage.test.ts and
+   slsa-verifier.test.ts green. Those tests now exist, and the JUnit renderer
+   now also emits `slsa-basis` (the acceptance box claimed every renderer
+   showed it; JUnit showed the level and omitted the checks that produced it).
+2. `rejects an array digest rather than an algorithm-to-value map` called
+   `writeSubjectDigest([])`. An empty array is already rejected by the
+   `entries.length === 0` check. `Object.entries(["deadbeef"])` is
+   `[["0","deadbeef"]]`, which would pass that check and the string-value
+   check; the test now uses that input, so deleting `Array.isArray` turns it
+   red.
+3. The slsa-github-generator Level 3 path still combined a generator mention
+   in one file with `workflow_call` in another. Same bound as the npm-native
+   path, on files rather than jobs: both signals must now live in one
+   workflow file. Split-file stays at 2 via the Level 2 generator pattern.
+
+`delete_branch_on_merge` is now `true` on this repository (the handover
+recorded `false`). The worktree at `_scg-wt-sbomfix` still holds
+`fix/sbom-correctness-cluster` and still has to be removed before merging
+#221.
+
+## Provenance published through a reusable workflow was rejected
+
+Issue 190's fix required the `npm publish --provenance` step and the
+`id-token: write` permission to resolve to the same job. Correct for a job that
+publishes from its own steps; wrong for a common real layout.
+A caller job holds the permission and does nothing but `uses:` a reusable
+workflow; the callee runs the publish. GitHub passes the CALLER permissions to
+the callee, so the token really is in effect at the publish step and that
+configuration really does mint Sigstore provenance. It was graded 2.
+A false negative is the safe direction of error, but silently under-grading is
+the same defect class as silently over-grading, so it is fixed: a caller job
+holding `id-token: write` whose `uses:` resolves to a LOCAL workflow with a
+publishing job now counts.
+THE BOUND THAT KEEPS THIS FROM BECOMING OVER-GRADING: only local callees are
+resolved. A remote `owner/repo/...@ref` cannot be read from the checkout, and a
+lookup that collapsed it to a bare file name would match a local file of the
+same name and credit a workflow nobody here has read. Remote refs keep their
+full form, fail the lookup, and are reported rather than credited. A test pins
+that refusal with a same-named local decoy present.
+FOUND WHILE VERIFYING, worth recording: the first implementation compiled,
+read correctly and did nothing, because the map was keyed on a parsed
+workflow's bare file name while `uses:` gives a repository path. Only running it
+on a real layout showed it - the diff looked right.
+
+## Zero coverage and an unread language are not the same state
+
+The first version of the issue-205 fix fired on `filesScanned === 0`. That is a
+different predicate from the one the issue describes. Issue 205 is a scan of an
+EMPTY TREE - a checkout that did not run, a wrong working directory, a sparse
+checkout, an empty mounted volume.
+An ordinary Java, C#, Ruby, PHP, Kotlin, Swift or plain-HTML repository has
+files that simply carry no scannable extension, so it also landed on
+`filesScanned === 0`. Measured on a two-file Maven project: exit 0 became exit 1
+and a brightgreen badge became orange, with remediation text naming only causes
+that did not apply to it.
+That is a false positive reaching every adopter whose language is not in the
+scanned set, and a control that fails ordinary use gets switched off - taking
+the real issue-205 protection down with it.
+Split into the two states:
+  allFiles.length === 0                     -> SCAN_ZERO_COVERAGE, partial, fails.
+  allFiles.length > 0 and filesScanned == 0 -> SCAN_NO_SCANNABLE_FILES, informational.
+The second is deliberately NOT in PARTIAL_SCAN_RULES: "this tool does not read
+that language" is a statement about the tool, not a coverage gap in the run. It
+still says so out loud, so it cannot be read as a clean verdict either.
+WHAT THIS DOES NOT COVER: a scan whose coverage is merely LOW rather than zero -
+one file of a thousand because ignore globs pruned the rest - is still reported
+as a complete verdict. A proportional coverage floor needs a threshold nobody
+has chosen, and guessing one here would repeat the mistake this entry records.
+
+## No green without evidence: four controls that reported success without doing the work
+
+Branch fix/no-green-without-evidence. Model claude-opus-5. No version bump; the
+comments say "unreleased" rather than naming a release nobody has chosen yet.
+
+Issues 205, 188, 189 and 190 are one defect with four faces: an output that
+cannot say "I did not check this", so ignorance renders as a pass. All four were
+reproduced at HEAD fa81f70 before anything was edited, and the reproduction
+output is in the pull request body.
+
+### What changed
+
+- **A scan of zero files is no longer a clean verdict** (issue 205).
+  `src/scanner.ts` raises `SCAN_ZERO_COVERAGE` when `filesScanned === 0`, and
+  that rule joins `PARTIAL_SCAN_RULES` in `src/pattern-scanner.ts`, so the
+  existing partial-coverage path fires in every renderer that already honours
+  it. Measured before: the badge for an empty directory was byte-identical to
+  the badge for a clean two-file tree, and `--fail-on critical` exited 0. After:
+  `partial`/orange, and exit 1. `action.yml` carries the same rule list and a
+  test enforces that the two stay identical, so the Action's coverage schema was
+  updated with it.
+- **SARIF, GitLab and JUnit now state their own denominator** (issue 205). The
+  SARIF invocation is now always emitted and carries a `coverage` property bag;
+  GitLab always carries a coverage message, warn-level when the count is zero;
+  JUnit always emits a `<properties>` block with the file counts. Those three
+  formats read neither `filesScanned` nor `totalFiles` before, which is why they
+  could not tell nothing from nothing-found.
+- **An unsigned DSSE envelope is no longer valid provenance** (issue 188). The
+  `signatures` member was never read. `signatures: []`, a missing key, and
+  entries with no `sig` value are now `kind: "malformed"` and raise a new
+  `SLSA_ATTESTATION_UNSIGNED` finding. `AttestationResult` gained
+  `structurallyValid`, `signatureStatus` and `checksNotPerformed`; the boolean
+  named `valid` is kept as a deprecated alias so no consumer breaks.
+- **An empty or non-string digest set is malformed** (issue 189). The old test
+  was `digest && typeof digest === "object"`, satisfied by both `{}` and `[]`.
+  `isUsableDigestSet` now requires a non-empty map of non-empty strings, and
+  `subjectCount` counts only subjects that pass it.
+- **A commented-out publish step no longer grades a repository 3/3** (issue 190).
+  Level 2 and the generator reference are matched over comment-stripped workflow
+  text; the npm-native Level 3 path resolves `npm publish --provenance` and
+  `id-token: write` inside ONE parsed job, using the repository's own
+  `src/workflow-ast.ts` and GitHub's real permission semantics (a job-level
+  block REPLACES the workflow-level one). `HERMETIC_BUILD_PATTERNS` is gone: it
+  matched `workflow_call`, which is a trigger and not an isolation property, and
+  hermeticity is not a SLSA v1.0 Build L3 requirement at all.
+- **A malformed attestation can no longer coexist with a 3/3 headline** in the
+  same report; it caps the level at 2.
+- **`SLSAAssessment`** (`level`, `basis`, `notAssessed`, `attestation`) is on the
+  report and rendered by the text, JSON, SARIF and JUnit formats, so the number
+  never appears without the checks that produced it and the three this tool
+  never performs.
+
+### Two existing assertions were CHANGED, not added
+
+Both locked in a defect, and both are called out in place with the reason:
+
+- `src/__tests__/slsa-verifier.test.ts`: "should treat --provenance +
+  id-token:write split across two workflow files as L3" asserted 3 for a
+  configuration that cannot mint provenance at runtime. It now asserts 2.
+- `src/__tests__/scanner.test.ts`: "should return a clean report for an empty
+  directory" asserted precisely the behaviour issue 205 reports. It now asserts
+  the coverage signal. The security half of it is unchanged.
+
+### WHAT THIS DOES NOT COVER
+
+- **No signature is verified.** Nothing here fetches key material, walks a
+  Fulcio chain, or checks a Rekor inclusion proof. A syntactically valid but
+  untrusted signature is still indistinguishable from a trusted one, and issue
+  188's acceptance criterion asking for those three states to be distinguishable
+  is only two-thirds met: absent is now distinguishable, forged is not. Real
+  verification means choosing trust roots and adding a network or bundled-root
+  dependency to a supply-chain tool, which is an owner decision.
+- **The field named `valid` still exists** and still reads as a verification
+  verdict. Renaming it outright breaks every published consumer of the exported
+  API, so it is deprecated in place rather than removed. Owner decision.
+- **The output is still labelled "SLSA Level"** and still renders as `n/3`.
+  Issue 190 argues the number should not be published under a specification's
+  name when it cannot mean the specification's level. That is a public-facing
+  rename touching README, badge and JSON consumers. Owner decision; only the
+  qualifying text was added.
+- **Low coverage is not partial coverage.** One file scanned out of a thousand,
+  because ignore globs pruned the rest, is still reported as a complete verdict.
+  Only zero is treated as a gap. A proportional floor needs a threshold nobody
+  has chosen.
+- **`subjectCount` is a count of digested subjects, not of verified ones.** No
+  digest is compared against any artefact, in the tree or published.
+- **The full suite was not run locally.** Only the files touched plus their
+  neighbours were, and `src/__tests__/vscode-scanner.test.ts` fails 14 tests here
+  for a missing `zip` binary, identically on unmodified `main`. CI on Linux is
+  the authoritative verdict.
+
+### Noticed in passing, fixed, and NOT covered by a test
+
+`slsaLevel` was computed inside the returned object literal, which is evaluated
+AFTER `fs.rmSync(tempDir)`. For a `github` scan target the SLSA level was
+therefore graded against a directory that had just been deleted, while
+`verifySLSA` had run much earlier against the real checkout, so the level and the
+findings in one report could disagree. The assessment is now taken before the
+cleanup. This is not covered by a new test: exercising it needs a real clone, and
+this branch adds no networked test.
 ## Threat-intel sweep 2026-08-23: 38 package IOCs, no atomic indicators
 
 Model: claude-opus-5. Branch threat-intel/2026-08-23. No version bump.
