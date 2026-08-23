@@ -1,3 +1,145 @@
+## Remaining review findings on the SBOM cluster: they reproduced, and they are closed
+
+Independent re-read of the four leftovers on #221:
+
+1. The `!refsArePaths` guard is load-bearing and was untested. A package.json
+   fallback uses the declared key as the bom-ref, so prefix-matching `src`
+   against a finding in `src/app.js` would attribute that finding to an
+   unrelated dependency. A test now asserts the affects ref stays `target`;
+   deleting the guard turns it red.
+2. `expect(ids).toContain(steam?.correlationId)` could not fail under the
+   pre-change overwrite: the last-written incident is still one of `ids`. The
+   legacy field is now asserted to be `correlationIds[0]`, and not the last
+   entry, which is the overwrite the field used to do.
+3. `describeInventoryCoverage()` has three branches. Only `NOTHING WAS
+   INVENTORIED` was asserted. All three states are now named by a test that
+   calls the function.
+4. The CHANGELOG said a bare component count is never all a reader sees. That
+   sentence reached only the `--sbom-output` stderr line. The default text
+   report now prints the coverage sentence under the SBOM bar.
+
+## Two review findings on the SBOM cluster: an unenforced checksum and a root-only walk
+
+Adversarial review found the conformance proof anchored to three vendored
+CycloneDX schema files whose integrity nothing checked. `.gitattributes`
+justified pinning them to LF by saying that otherwise "every recorded checksum
+would stop matching, so the one check that says 'this is still the official
+schema' could no longer be run" - asserting a check that did not exist. The
+checksums sat in the fixtures README and were never compared to anything.
+`src/__tests__/vendored-schema-integrity.test.ts` is that check. It parses the
+expected values out of the README rather than carrying a second copy, because
+two copies of a checksum is how one of them quietly stops matching. Mutation
+proof: append one byte to a schema, exit 1; restore, exit 0.
+Second finding: `detectUninventoriedManifests()` looked only at the project
+root. A monorepo keeps `pyproject.toml` and `Cargo.toml` under `packages/*` or
+`services/*`, so issue 195 survived intact in the layout most likely to hold
+more than one ecosystem - while the README stated every such file is named. It
+now walks, skipping `node_modules` and friends, bounded at depth 4 and 25
+reported entries.
+WHAT THIS DOES NOT COVER: the walk is bounded, so a manifest deeper than four
+levels is still not named, and that is deliberate rather than an oversight - an
+unbounded traversal inside a scanner becomes the slowest part of a scan and then
+gets switched off. The bound is pinned by a test, so raising it is a decision
+someone makes rather than a change someone discovers.
+
+## SBOM cluster follow-up: the incident evidence document that was already there
+
+Model: claude-opus-5. Branch fix/sbom-correctness-cluster. No version bump.
+Follow-up to the entry below, addressing the second comment on issue 200.
+
+`scan --export-incident-md` has shipped for several releases and writes exactly
+the artefact the NIS2 bullet describes: risk score, each detected incident with
+its confidence, narrative and indicator list, the critical findings, and the
+response playbooks. The README named it nowhere, so the bullet promised less
+than the tool does while pointing at formats that carried nothing. Verified by
+running it against the issue's own fixture before writing the sentence. It is now
+named in the NIS2 bullet. No behaviour changed; this is documentation of an
+existing flag.
+
+WHAT THIS DOES NOT COVER: the flag is still absent from the CLI options table and
+from the GitHub Action inputs. It is mentioned where a reader looking for
+incident evidence will be, not everywhere it could be listed.
+
+## SBOM: the document was well formed and wrong, in seven places at once
+
+Model: claude-opus-5. Branch fix/sbom-correctness-cluster. No version bump.
+Closes issues 191, 192, 193, 195, 197, 198 and 200; all seven were reproduced on
+this branch's base commit before anything was changed.
+
+The seven had one shape. The emitted CycloneDX document parsed, said
+`bomFormat: CycloneDX` and `specVersion: 1.6`, and the process exited 0, while
+the values a consumer actually reads were unmatchable, truncated, unresolvable or
+absent with no statement that they were absent. That shape is why they are fixed
+together and share one regression suite.
+
+Measured on this repository, before and after:
+
+- **Schema.** 119 of 119 components carried a hash, 0 of 119 in the encoding the
+  spec requires, 119 errors from the official CycloneDX 1.6 schema. `integrity`
+  is base64; `hashes[].content` must be hex. Now 0 errors.
+- **purls.** 55 of 119 matched the canonical purl from `packageurl-js`, the purl
+  specification's reference implementation; the other 64 were scoped names with
+  `%2F` where the separator belongs. Now 119 of 119.
+- **Identity.** A nested duplicate entered the inventory as
+  `middle/node_modules/@acme/dep`, so the older installed version was present in
+  the document and unfindable under its own name. A workspace member was named
+  after its directory while its lockfile entry declared the real name.
+- **Versions without a lockfile.** The fallback produced a version by deleting
+  one leading non-digit character: `latest` became `atest`, and `^1.2.3` became
+  the factual claim that 1.2.3 ships. A component now carries `version` and
+  `purl` only for an exact version, and says why when it does not.
+- **Unread ecosystems.** A Python, Cargo or Go project got `components: []` and
+  exit 0. The document now carries `inventory-coverage` and `not-inventoried`,
+  and the CLI prints the same sentence next to the component count.
+- **Two commands, one artefact.** `--sbom-output` wrote a file with no
+  `vulnerabilities` key while `--format sbom` merged the findings in; every
+  `affects[].ref` in the latter pointed at a path, not at a bom-ref, so 0 of the
+  references in a scan of this repository resolved.
+- **Incidents.** SARIF and CycloneDX carried no incident name, confidence or
+  indicator list, and a finding belonging to two incidents reported one.
+
+WHAT THIS DOES NOT COVER, so the next reader does not overestimate it:
+
+- **No new ecosystem is inventoried.** A Python, Cargo, Go, RubyGems, Composer or
+  NuGet project still produces an SBOM with no components from that ecosystem,
+  and a pnpm, yarn or bun project still falls back to the direct dependencies in
+  `package.json`. What changed is that the document and the CLI now SAY so. The
+  issue asked for exactly this, and the stronger option - refusing to write an
+  SBOM at all for an ecosystem that cannot be inventoried - is a behaviour change
+  for existing adopters and is left as an owner decision, named in the pull
+  request.
+- **`--sbom-output` writes a different file than it did.** It now contains the
+  scan's findings as `vulnerabilities`, and `annotations` when the scan
+  correlated an incident. That is the point of issue 198, but a consumer that
+  diffs SBOMs across versions will see it.
+- **`affects` attribution is prefix matching on lockfile paths.** It is attempted
+  only when the inventory came from `package-lock.json`, because only then are
+  bom-refs relative paths. On the `package.json` fallback every finding is
+  attributed to the subject with its path in a property. Nothing is guessed, but
+  nothing is attributed either.
+- **The vendored CycloneDX schemas can go stale.** They are unmodified upstream
+  copies with their SHA-256 recorded in
+  `src/__tests__/fixtures/cyclonedx/README.md`, pinned to LF in `.gitattributes`
+  so a Windows checkout cannot silently invalidate the checksums. Nothing
+  automatically notices a new 1.6 patch release; refreshing them is a manual
+  step, documented there.
+- **Markdown, HTML, badge, GitLab and JUnit still carry no incident record.** The
+  README's NIS2 bullet now names only the three formats that do, rather than
+  being widened to formats that would then need the same work.
+- **The conformance suite validates structure, not truth.** A document that
+  passes the CycloneDX schema and carries canonical purls can still describe the
+  wrong tree if the lockfile is wrong. The schema check closes "well formed and
+  wrong", not "wrong".
+
+Three test-only devDependencies were added: `ajv` and `ajv-formats` to evaluate
+the real schema, `packageurl-js` to compare against the reference purl
+implementation. All three carry `dev: true` in `package-lock.json`, verified by
+reading the lockfile, so `npm ci --omit=dev` and the Docker build drop them and
+the published tarball's dependency set is unchanged.
+`@cyclonedx/cyclonedx-library` was deliberately NOT added: it declares `ajv`,
+`ajv-formats` and `packageurl-js` as OPTIONAL PEER dependencies, which is the
+shape that gets a dev-only package recorded without the `dev` flag and shipped
+into a production image.
 ## Independent review of the remaining #220 findings: they reproduced, and they are closed
 
 The handover asked a second reader to contradict the two vacuous-test findings

@@ -140,7 +140,15 @@ export { buildTriageScope, type TriageScope } from "./triage-scope.js";
 export { checkSlaCompliance } from "./sla-engine.js";
 export { forecastRisk } from "./risk-forecast.js";
 export { calculateMetrics } from "./metrics.js";
-export { generateSbomDocument } from "./sbom-generator.js";
+export {
+  generateSbomDocument,
+  describeInventoryCoverage,
+  detectUninventoriedManifests,
+  exactVersionOf,
+  parseIntegrity,
+  resolveNpmAlias,
+  lockfileEntryName,
+} from "./sbom-generator.js";
 export {
   verifySLSA,
   getSLSALevel,
@@ -184,6 +192,7 @@ export type {
   WatchlistEntry,
   WatchlistConfig,
   WatchlistAlert,
+  SbomAnnotation,
   SbomDocument,
   SbomComponent,
   SbomDependency,
