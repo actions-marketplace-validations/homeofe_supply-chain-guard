@@ -11,9 +11,9 @@
   },
   "files": {
     "STATUS.md": {
-      "checksum": "sha256:7e5c10e62c28df22af817d7acc3b88a8c53d314749f924935729174b5c60b769",
+      "checksum": "sha256:aa868987b2f67042393f096c3ca84e005b870962dcb64692af03e499ec77ea08",
       "updated": "2026-08-22T23:50:00Z",
-      "lines": 3745,
+      "lines": 3812,
       "summary": "`.ai/handoff/STATUS.md` is prepend-only, so two branches almost always differ by"
     },
     "NEXT_ACTIONS.md": {
@@ -41,13 +41,13 @@
       "summary": "{"
     },
     "DASHBOARD.md": {
-      "checksum": "sha256:5c385b8b6e27e3de91583c371b5e89fdc359f2e6f0c2e66a333a9978170d79e0",
+      "checksum": "sha256:a3d8ae075d2db1f6febd27fb3efdf9fa51b6322dfd9c1193bc5cf9835466c3e8",
       "updated": "2026-08-22T23:51:09Z",
       "lines": 72,
       "summary": "Current package inventory and CI gate wiring are generated below."
     },
     "TRUST.md": {
-      "checksum": "sha256:f7412a10426df3060ef8a41152da9d74feb331f16dc4b85572fb957830073a50",
+      "checksum": "sha256:013d932a3abf2a16f24d267e43a7267ccc280901cf3745a18d94f9cb0c8150e6",
       "updated": "2026-08-22T23:51:09Z",
       "lines": 65,
       "summary": "Provenance and status are tracked independently."
