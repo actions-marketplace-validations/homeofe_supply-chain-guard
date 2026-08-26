@@ -1,3 +1,113 @@
+## 2026-08-26: Release v6.0.3 (threat-intel sweep 10 + importer decline list)
+
+Started as the daily scheduled sweep: 164 malicious-package IOCs imported from the
+GitHub Advisory Database and corroborated against OSV.dev. The owner then asked for
+the two carried open items to be fixed and the release cut in the same pass, so this
+also closes the importer's daily red exit and the stale branch invariant, and ships
+as v6.0.3. Model: claude-opus-5.
+
+### The zalastax backfill still dominates the window, and date-purity still held
+
+Tenth consecutive sweep blocked by the same `@zalastax/nolb-*` block. Unsliced, the
+14-day window offered 4,527 new entries and exited red with the undrainable-backlog
+error (4,277 behind `--limit 250`, 3,777 of them projected to age out). The
+diagnosis ran exactly as the previous nine:
+
+- JSON dump grouped by `firstSeen` and scope: 4,363 `@zalastax/nolb-*` entries, all
+  on 2026-08-14, and that day carried **0 non-zalastax new entries**. Date-purity
+  holds, so no timestamp slice was needed.
+- Pattern-coverage re-check against the shipped rule
+  `^@zalastax\/nolb-[a-z0-9._-]+$` in `src/patterns.ts`: **4,363 of 4,363 matched,
+  0 unmatched, 0 carrying a version pin**. That is what makes the slice lossless,
+  and it is the check that replaced the older "are these names dead" probe.
+- Two slices took the whole real remainder: `--since 2026-08-12 --until 2026-08-13`
+  returned 0 and `--since 2026-08-15 --until 2026-08-26` returned 164.
+  0 + 164 = 4,527 - 4,363 exactly, which is the arithmetic that proves nothing real
+  was dropped.
+
+This block leaves the 14-day window on 2026-08-28, so sweep 11 (2026-08-27) should
+be the last one that needs the slice. If a sweep from 2026-08-29 onward still
+reports a large backlog, it is NOT zalastax: re-run the JSON dump and group by
+`firstSeen` and scope before touching anything else.
+
+### What the 164 entries are
+
+Dominant cluster is a 59-entry dependency-confusion wave against the T-Bank /
+Tinkoff internal npm namespace (31 `tinkoff-*`, 16 `twork-data-services-*`, five
+`statist-browser-typed-client-*`, plus `tms-x-headers`, `time-webkit-tag`,
+`taiga-ui-proprietary-navigation` and three more), about half published at sentinel
+`20.x.y` versions. Worth recording because this feed already carries
+`nexus[.]tcsbank[.]ru` and `repo-linux[.]tcsbank[.]ru` from the Flooding Dropper /
+WEL1DROPPER reporting: the same organisation is being probed from two directions.
+No shared payload or operator is claimed, only the overlap in target.
+
+Then 24 more `streak-*` / `svelte-*-streak*` name-farm entries extending the family
+that carried the RedShell / RedC2 4.0 loader in v6.0.2, six more `cls`/`dim` UI
+variants, an 11-entry `vite-plugin-*` lure set, the smaller `devplatform-*`,
+`bigops-*`, `wm-*` and `mc-*` internal-namespace sets, and eight PyPI entries.
+
+Two live packages were hijacked rather than squatted and are version-pinned only, so
+their clean releases stay installable: `react-remove-properties@6.14.1` and
+`spotify-url-infos@3.4.2`. Seventeen bare names were probed against
+`registry.npmjs.org` before accepting them; every one came back as an npm security
+holding package, so the registry had already taken the name down and blocking by
+name carries no false-positive risk.
+
+### STEP 1b (non-package enrichment) produced nothing addable today
+
+Searched Socket, safedep, StepSecurity, Aikido, JFrog, Elastic, Wiz, TrendAI and The
+Hacker News. Every campaign still on the front page is already fully ingested,
+including the deliberate exclusions: keyv / ChainDrop, RedShell / RedC2 4.0
+(including `217[.]60[.]77[.]63` and the fourteen package names, with tests),
+Flooding Dropper / WEL1DROPPER (including the documented decision to cover the four
+`dl[.]wel1[.]ru` platform subdomains by substring and to leave `tcsbank[.]ru` and
+`cloudpayments[.]ru` unblocked as victim infrastructure), mini Shai-Hulud
+TanStack / Mistral (including `git-tanstack[.]com`, with `filev2[.]getsession[.]org`
+and the Session seed nodes handled as documented), and TeamPCP. Nothing new was
+published in the 2026-08-24 to 2026-08-26 window that carries an atomic indicator
+this feed lacks. No hand-added IOCs in this PR.
+
+### Both carried open items are now closed
+
+**1. The importer no longer re-proposes a family it will never take.** The root cause
+was that `dedupe` compares candidates against the committed feed and against nothing
+else, so a family deliberately covered by one anchored rule in `src/patterns.ts`
+instead of N feed entries is re-proposed forever. `threat-feed-declined.json` at the
+repository root now lists such families, each with a mandatory `reason` and a
+mandatory `coveredBy` naming the coverage that replaces them. Declines are applied
+after dedupe and before `--limit`, so a declined family neither eats the per-run
+budget nor counts as backlog. Seeded with `@zalastax/nolb-`. Verified end to end: an
+unsliced default `--dry-run`, which had failed for ten consecutive days, now reports
+`Declined: 4363 (@zalastax/nolb- x4363)` and exits 0.
+
+The other candidate fix, "skip anything the pattern tables match", was considered and
+REJECTED, and the reasoning is written into the code so it is not re-litigated:
+`MALICIOUS_PACKAGE_PATTERNS` is read by the npm-scanner name check and its
+package.json fallback, NOT by the generic directory scan, which matches exact feed
+names only. A pattern match is therefore not equivalent to feed coverage, and
+auto-skipping on one would quietly narrow detection. The tables also carry heuristics
+such as `^[a-z]{20,}$`, which would have swallowed genuinely new malware whose name
+happens to be long. Declining stays a per-family human decision, reviewable in a diff.
+
+Mutation proof: baseline 83/83 green, `applyDeclineList` stubbed to a no-op turns 3
+tests red, restored file byte-identical to the pre-mutation copy and green again.
+
+**2. The branch invariant is corrected where it is committed.** `docs/ci-and-release.md`
+and `.ai/handoff/CONVENTIONS.md` both said a finished deploy leaves exactly `main` and
+`v5`. CI derives the floating major ref from the tag
+(`git push origin HEAD:refs/heads/v${MAJOR}`), so v6.0.0 created `v6` by itself and
+`v5` stays frozen at the last v5 release because consumers still pin it. Both now read
+"`main` plus one major-ref branch per released major, and no topic branches", which is
+what the post-release check is actually for. The per-machine `CLAUDE.md` copy was
+updated too, but it is gitignored, so this paragraph is the durable record.
+
+### Carried forward
+
+Nothing from this session. The `@zalastax/nolb-*` block leaves the 14-day window on
+2026-08-28 on its own; with the decline list in place that no longer matters either
+way. If a future sweep reports a large backlog, do NOT assume zalastax: dump
+`--dry-run --json --limit 100000` and group by `firstSeen` and scope first.
+
 ## 2026-08-25: Release v6.0.2 (threat-intel patch)
 
 Patch release carrying the 115 IOCs merged in #234 (107 imported package IOCs plus
