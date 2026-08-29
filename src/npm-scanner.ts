@@ -20,6 +20,7 @@ import {
   SCANNABLE_EXTENSIONS,
   MAX_FILE_SIZE,
   makeOversizedSkipFinding,
+  makePackageCoverageFindings,
   truncateMatch,
 } from "./patterns.js";
 import { parseGitHubUrl } from "./github-trust-scanner.js";
@@ -27,6 +28,7 @@ import { hasPartialScanFinding, matchPatternInFile, recordUnreadablePath } from 
 import { collectExtractedFiles } from "./extracted-file-walker.js";
 import { getBundledFeedRef } from "./threat-intel.js";
 import { matchBareNpmIOC } from "./install-guard.js";
+import { parseJsonObject } from "./json-utils.js";
 import {
   downloadHttpsFile,
   fetchHttpsBuffer,
@@ -177,6 +179,12 @@ export async function scanNpmPackage(
   } else {
     recordNpmNoArtifact(findings);
   }
+
+  // A package whose files were all outside the scannable set must not report as
+  // clean. The directory path has said so since issue 205; this path never did.
+  findings.push(
+    ...makePackageCoverageFindings(fileCounts.totalFiles, fileCounts.filesScanned),
+  );
 
   // Snapshot completeness before a severity filter can hide its informational
   // transparency finding, matching the PyPI scanner contract.
@@ -514,12 +522,9 @@ export async function checkRepositoryClaim(
   );
   if (body === null) return; // unfetchable: too benign to flag
 
-  let repoPkg: { name?: unknown; workspaces?: unknown; private?: unknown };
-  try {
-    repoPkg = JSON.parse(body) as { name?: unknown; workspaces?: unknown; private?: unknown };
-  } catch {
-    return;
-  }
+  const parsedRepoPkg = parseJsonObject(body);
+  if (!parsedRepoPkg) return;
+  const repoPkg = parsedRepoPkg as { name?: unknown; workspaces?: unknown; private?: unknown };
   // Monorepo / workspace-root signals: a root that declares `workspaces`, or is
   // marked private (the near-universal marker of an unpublished monorepo root
   // that legitimately publishes many differently-named member packages).

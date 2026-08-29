@@ -59,6 +59,45 @@ top; release tags trigger the CI publish pipeline (npm via OIDC + GitHub Release
   entries, which is no longer true and was the source of the expiry behaviour above.
 
 ### Fixed
+- **Fifteen file types were never read, so identical malware was invisible in them.**
+  A payload scoring three critical findings in a `.js` file produced zero findings in
+  `.mts`, `.cts`, `.ps1`, `.psm1`, `.psd1`, `.bat`, `.cmd`, `.rb`, `.php`, `.cs`,
+  `.vue`, `.svelte`, `.ipynb`, `.zsh` and `.fish`. `.mjs` and `.cjs` were already read
+  while their TypeScript siblings were not, and RubyGems, Composer and NuGet have
+  dedicated scanners and feed entries while their source was never opened. All fifteen
+  are now scanned. Note that the rule tables are JavaScript-shaped: a non-JS file gains
+  coverage for language-agnostic rules and for JavaScript embedded in it, which is the
+  realistic dropper shape, not full analysis of that language.
+- **`supply-chain-guard npm` could report a clean verdict for a package it never read.**
+  When every file in a downloaded artifact fell outside the scannable set, the npm path
+  reported "0 / 1 files scanned" with no finding and exit 0. The directory path has
+  emitted a coverage finding for that state since v5; the package path now does too, at
+  the same informational severity so it cannot fail a build that is behaving correctly.
+- PyPI threat-feed lookups now apply PEP 503 name normalization, so case and runs of
+  `-`, `_` or `.` cannot hide a version-pinned IOC in Poetry, uv or Pipenv lockfiles.
+- Archive preflight now caps normalized paths at 64 components and 16 KiB, and charges
+  prefix construction by its real component work. Deep PAX paths can no longer force
+  quadratic validation after bypassing the GNU long-name limit.
+- The Mini Shai-Hulud loader rule now bounds optional whitespace at 20 characters. This
+  preserves the rule's whitespace-led headline match while removing the long-space
+  backtracking path.
+- Valid JSON primitives such as `null` are rejected as manifest objects throughout the
+  core scanner, lockfile cross-checks, dependency-confusion scan, npm repository claim
+  check and SBOM generation instead of causing property-access exceptions.
+- Nested `poetry.lock`, `uv.lock` and `Pipfile.lock` files now receive the same IOC checks
+  as root lockfiles. Lockfile dispatch skips `vendor/` and `target/`, while raw digest
+  scanning of files in those trees remains intact.
+- PyPI and VS Code package scans now emit the same zero-coverage finding as npm when
+  an artifact contains no file the scanner opened, instead of permitting an implicit
+  clean verdict for unread contents.
+- `supply-chain-guard guard npm exec <package>` now checks the package against threat
+  intelligence before npm can download and execute it, including the positional and
+  `--package` forms.
+- Auto-run npm lifecycle hooks now flag bounded Windows `cmd` batch launchers,
+  PowerShell script launchers, and encoded PowerShell commands. Windows payload files
+  were already opened by this release; their package-script execution edge is now
+  reported too.
+
 
 - **Six false positives that had been shipping for about two months.** All were
   bare-name package blocks, which flag EVERY version of a name.

@@ -2070,6 +2070,30 @@ export const SUSPICIOUS_SCRIPTS: PatternEntry[] = [
     rule: "SCRIPT_PREINSTALL_EXEC",
     notTestFile: true,
   },
+  {
+    name: "windows-cmd-launcher",
+    pattern: "\\bcmd(?:\\.exe)?(?:\\s+/[dqs])*\\s+/(?:c|k)\\b[^\\r\\n]{0,2048}\\.(?:bat|cmd)\\b",
+    description: "install hook launches a Windows batch or command script",
+    severity: "medium",
+    rule: "SCRIPT_WINDOWS_CMD",
+    notTestFile: true,
+  },
+  {
+    name: "windows-powershell-script",
+    pattern: "\\b(?:powershell|pwsh)(?:\\.exe)?\\b[^\\r\\n]{0,2048}-(?:file|command)\\s+[^\\r\\n]{0,2048}\\.ps1\\b",
+    description: "install hook launches a PowerShell script",
+    severity: "medium",
+    rule: "SCRIPT_POWERSHELL_LAUNCH",
+    notTestFile: true,
+  },
+  {
+    name: "windows-powershell-encoded",
+    pattern: "\\b(?:powershell|pwsh)(?:\\.exe)?\\b[^\\r\\n]{0,2048}-(?:encodedcommand|enc)\\b",
+    description: "install hook launches encoded PowerShell",
+    severity: "critical",
+    rule: "SCRIPT_POWERSHELL_ENCODED",
+    notTestFile: true,
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -2548,7 +2572,7 @@ export const CAMPAIGN_PATTERNS: PatternEntry[] = [
   },
   {
     name: "mini-shai-hulud-bun-loader",
-    pattern: "[\"'`/\\\\\\s\\[]\\s*(?:setup\\.mjs|execution\\.js)\\b",
+    pattern: "[\"'`/\\\\\\s\\[]\\s{0,20}(?:setup\\.mjs|execution\\.js)\\b",
     description:
       "Reference to setup.mjs or execution.js detected. Loader filenames used by the Mini Shai-Hulud preinstall worm to download Bun runtime and execute the credential stealer payload.",
     severity: "high",
@@ -3298,6 +3322,30 @@ export const SCANNABLE_EXTENSIONS = new Set([
   ".js",
   ".ts",
   ".jsx",
+  // Siblings of .mjs/.cjs. Their absence was an oversight, not a decision: the
+  // same TypeScript payload is read in .ts and was invisible in .mts.
+  ".mts",
+  ".cts",
+  // Windows install-script vectors. Measured before this change: a postinstall
+  // of `cmd /c .\install.bat` produced literally zero findings, and a .ps1
+  // payload that scores exit 2 as .js scored exit 0.
+  ".ps1",
+  ".psm1",
+  ".psd1",
+  ".bat",
+  ".cmd",
+  // Shell siblings of .sh/.bash.
+  ".zsh",
+  ".fish",
+  // Ecosystems this scanner already claims to support, whose source was never
+  // read: RubyGems, Composer and NuGet respectively.
+  ".rb",
+  ".php",
+  ".cs",
+  // Single-file components and notebooks carry executable script blocks.
+  ".vue",
+  ".svelte",
+  ".ipynb",
   ".tsx",
   ".mjs",
   ".cjs",
@@ -3328,6 +3376,54 @@ export const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5 MB
  * and can be filtered with --min-severity or --exclude FILE_TOO_LARGE_SKIPPED.
  * The oversized body is never read; only fs.stat metadata is reported.
  */
+/**
+ * Coverage findings for a scanned package artifact (npm tarball, PyPI sdist,
+ * .vsix). One implementation shared by the three remote scanners.
+ *
+ * src/scanner.ts keeps its own copy for the directory path on purpose: its
+ * remediation text names checkouts, depth limits and ignore globs, none of
+ * which apply to a downloaded archive, and its wording is pinned by the
+ * issue-205 regression tests.
+ */
+export function makePackageCoverageFindings(
+  totalFiles: number,
+  filesScanned: number,
+): Finding[] {
+  if (filesScanned > 0) return [];
+
+  if (totalFiles === 0) {
+    return [{
+      rule: "SCAN_ZERO_COVERAGE",
+      description:
+        "No file was examined: the downloaded artifact contained no files. " +
+        "This result describes nothing about the package and cannot be a clean verdict.",
+      severity: "info",
+      confidence: 1,
+      category: "info",
+      match: "zero coverage",
+      recommendation:
+        "Treat this as not assessed, never as clean. Verify the artifact downloaded and " +
+        "extracted correctly, then scan again.",
+    }];
+  }
+
+  return [{
+    rule: "SCAN_NO_SCANNABLE_FILES",
+    description:
+      `No file was examined: 0 of ${totalFiles} files in this package carry an extension ` +
+      "this scanner reads. The package is not empty; its contents are outside the scanned " +
+      "set. This result says nothing about the package source, and it is not a clean verdict.",
+    severity: "info",
+    confidence: 1,
+    category: "info",
+    match: "no scannable files",
+    recommendation:
+      "Treat this as not assessed for source patterns rather than as clean. Metadata, " +
+      "manifest and provenance checks still ran. Inspect the package contents manually if " +
+      "the payload could live in a file type this scanner does not read.",
+  }];
+}
+
 export function makeOversizedSkipFinding(
   relativePath: string,
   sizeBytes: number,
