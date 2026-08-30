@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { analyzeDependencyRisks, levenshtein } from "../dependency-risk-analyzer.js";
+import {
+  analyzeDependencyRisks,
+  classifyTyposquat,
+  levenshtein,
+} from "../dependency-risk-analyzer.js";
 
 describe("Dependency Risk Analyzer", () => {
   describe("levenshtein", () => {
@@ -268,6 +272,95 @@ describe("Dependency Risk Analyzer", () => {
       if (f) {
         expect(f.confidence).toBeGreaterThan(0);
         expect(f.confidence).toBeLessThanOrEqual(1);
+      }
+    });
+  });
+
+  // The homoglyph-aware leading-character guard. Numbers come from
+  // scripts/measure-typosquat-fp.mjs over 31,200 real npm names: the guard removes
+  // 19 of 27 hits and loses none of the nine curated squats. The tests also pin the
+  // intentional structural boundary: unrelated leading edits are suppressed, while
+  // same-leading edits and declared homoglyph groups remain covered.
+  describe("leading-character guard", () => {
+    it("keeps every curated squat, including the leading homoglyph", () => {
+      const curated: Array<[string, string]> = [
+        ["lodas", "lodash"],
+        ["lodahs", "lodash"],
+        ["1odash", "lodash"], // leading 1-for-l: the case a blanket guard would lose
+        ["l0dash", "lodash"], // differs at position ONE, not zero
+        ["axois", "axios"],
+        ["raect", "react"],
+        ["yarsg", "yargs"],
+        ["chlak", "chalk"],
+        ["expres", "express"],
+      ];
+      for (const [squat, target] of curated) {
+        const hit = classifyTyposquat(squat);
+        expect(hit, `${squat} must still be classified as a typosquat`).toBeDefined();
+        expect(hit?.popular, `${squat} should point at ${target}`).toBe(target);
+      }
+    });
+
+    // Registry-sampled 2026-08-30: each of these is a live package with a real
+    // maintainer and a coherent description, one edit from a popular name only
+    // because its leading letter happens to differ. They are the dominant
+    // false-positive shape this guard exists to remove.
+    it("stops flagging live packages whose leading letter is simply different", () => {
+      for (const name of [
+        "focha", // Mocha wrapper by bahmutov
+        "meact", // Markdown React renderer
+        "xeact",
+        "zeact",
+        "xedis",
+        "xebug",
+        "zrequest",
+        "zrestify",
+      ]) {
+        expect(
+          classifyTyposquat(name),
+          `${name} is a real package, not a squat of a popular one`,
+        ).toBeUndefined();
+      }
+    });
+
+    it("still flags collisions that share the leading character", () => {
+      // rract is a taken-down squat ("Security placeholder" on the registry) and
+      // shares react's leading r, so the guard must not reach it.
+      expect(classifyTyposquat("rract")?.popular).toBe("react");
+      expect(classifyTyposquat("rreact")?.popular).toBe("react");
+    });
+
+    it("represents multi-member homoglyph groups without overwriting an edge", () => {
+      for (const [name, target] of [
+        ["1odash", "lodash"],
+        ["iodash", "lodash"],
+        ["lnquirer", "inquirer"],
+        ["1nquirer", "inquirer"],
+      ]) {
+        expect(classifyTyposquat(name)?.popular, `${name} should resolve to ${target}`).toBe(target);
+      }
+    });
+
+    it("owns the complete production decision, including safe-name exclusions", () => {
+      for (const name of ["lodash", "mysql", "ttypescript", "abc", "@scope/lodash"]) {
+        expect(classifyTyposquat(name), `${name} is excluded by production policy`).toBeUndefined();
+      }
+    });
+
+    it("measures all leading policies from the same unfiltered candidate corpus", () => {
+      const corpus = ["focha", "lodas", "1odash", "rract", "mysql", "ttypescript"];
+      const count = (policy: "none" | "same-leading" | "homoglyph-aware") =>
+        corpus.filter((name) => classifyTyposquat(name, policy) !== undefined).length;
+
+      expect(count("none")).toBe(4);
+      expect(count("same-leading")).toBe(2);
+      expect(count("homoglyph-aware")).toBe(3);
+    });
+
+    it("explicitly suppresses unrelated leading substitutions, insertions, and deletions", () => {
+      for (const name of ["zodash", "alodash", "odash", "eact", "xpress"]) {
+        expect(classifyTyposquat(name), `${name} is outside the shipped leading policy`).toBeUndefined();
+        expect(classifyTyposquat(name, "none"), `${name} remains in the raw one-edit set`).toBeDefined();
       }
     });
   });
