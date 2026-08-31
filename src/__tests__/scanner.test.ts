@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { scan } from "../scanner.js";
 
@@ -14,17 +15,25 @@ describe("Core Scanner", () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("should return a clean report for an empty directory", async () => {
+  // CHANGED ASSERTION (unreleased, issue 205). This test was named "should return a
+  // clean report for an empty directory" and asserted exactly that. A scan of
+  // an empty directory examined no file, so it is a report with no denominator
+  // and not a clean verdict; the badge it produced was byte-identical to the
+  // badge of a real clean tree. It now asserts the coverage signal instead. The
+  // security half of the original assertion is unchanged and still meaningful:
+  // an empty directory must raise no malware finding either.
+  it("should report an empty directory as zero coverage, not as clean", async () => {
     const report = await scan({
       target: tempDir,
       format: "text",
     });
 
     // v4.9: SLSA_LEVEL_0 (info severity, score=1) is emitted for directories
-    // without any build scripts — this is a posture finding, not a security alert.
+    // without any build scripts - this is a posture finding, not a security alert.
+    // Unreleased: SCAN_ZERO_COVERAGE is the coverage signal, likewise not an alert.
     // Verify no actual security/malware findings are present.
     const securityFindings = report.findings.filter(
-      (f) => !f.rule.startsWith("SLSA_"),
+      (f) => !f.rule.startsWith("SLSA_") && f.rule !== "SCAN_ZERO_COVERAGE",
     );
     expect(securityFindings).toHaveLength(0);
     expect(report.scanType).toBe("directory");
@@ -32,6 +41,19 @@ describe("Core Scanner", () => {
     expect(report.summary.high).toBe(0);
     expect(report.summary.medium).toBe(0);
     expect(report.summary.low).toBe(0);
+
+    expect(report.summary.filesScanned).toBe(0);
+    expect(report.findings.map((f) => f.rule)).toContain("SCAN_ZERO_COVERAGE");
+    expect(report.partialScan).toBe(true);
+  });
+
+  it("does not crash when package.json contains the valid JSON value null", async () => {
+    fs.writeFileSync(path.join(tempDir, "package.json"), "null");
+
+    const report = await scan({ target: tempDir, format: "text", noHistory: true });
+
+    expect(report.summary.filesScanned).toBe(1);
+    expect(report.sbomDocument.metadata.component.name).toBe(path.basename(tempDir));
   });
 
   it("should detect GlassWorm marker variable", async () => {
@@ -271,5 +293,171 @@ describe("Core Scanner", () => {
     expect(
       report.recommendations.some((r) => r.includes("GlassWorm")),
     ).toBe(true);
+  });
+
+  it("should skip files matched by an ignore: glob in the policy config", async () => {
+    fs.writeFileSync(
+      path.join(tempDir, ".supply-chain-guard.yml"),
+      ["ignore:", "  - vendor/**"].join("\n"),
+    );
+    const vendorDir = path.join(tempDir, "vendor");
+    fs.mkdirSync(vendorDir, { recursive: true });
+    fs.writeFileSync(path.join(vendorDir, "evil.js"), 'eval(atob("dGVzdA=="));');
+    fs.writeFileSync(path.join(tempDir, "keep.js"), 'eval(atob("dGVzdA=="));');
+
+    const report = await scan({ target: tempDir, format: "text" });
+
+    const evalFindings = report.findings.filter((f) => f.rule === "EVAL_ATOB");
+    expect(evalFindings.some((f) => f.file === "keep.js")).toBe(true);
+    expect(evalFindings.some((f) => (f.file ?? "").startsWith("vendor/"))).toBe(false);
+  });
+
+  it("keeps global walk-budget exhaustion partial when the next path is ignored", async () => {
+    fs.writeFileSync(
+      path.join(tempDir, ".supply-chain-guard.yml"),
+      ["ignore:", "  - a-ignored/**"].join("\n"),
+    );
+    const ignoredDir = path.join(tempDir, "a-ignored");
+    fs.mkdirSync(ignoredDir);
+    fs.writeFileSync(path.join(ignoredDir, "first.js"), "safe");
+    fs.writeFileSync(
+      path.join(tempDir, "z-unwalked-malicious.js"),
+      'eval(atob("dGVzdA=="));',
+    );
+
+    const report = await scan({
+      target: tempDir,
+      format: "text",
+      maxEntries: 2,
+      noHistory: true,
+    });
+
+    expect(report.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        rule: "PATH_SCAN_INCOMPLETE",
+        file: ".",
+      }),
+    ]));
+    expect(report.partialScan).toBe(true);
+    expect(report.findings.some((finding) => finding.rule === "EVAL_ATOB"))
+      .toBe(false);
+    expect(report.recommendations[0]).toMatch(/scan incomplete/i);
+  });
+  it("should apply ignore globs to specialized scanner findings", async () => {
+    fs.writeFileSync(
+      path.join(tempDir, ".supply-chain-guard.yml"),
+      ["ignore:", "  - .gitmodules"].join("\n"),
+    );
+    fs.mkdirSync(path.join(tempDir, ".git"));
+    fs.writeFileSync(
+      path.join(tempDir, ".gitmodules"),
+      '[submodule "hidden"]\n  url = http://untrusted.example/repo.git',
+    );
+
+    const report = await scan({ target: tempDir, format: "text" });
+
+    expect(report.findings.some((finding) => finding.file === ".gitmodules"))
+      .toBe(false);
+  });
+
+  it("should remove ignored specialized depth coverage before deriving partialScan", async () => {
+    fs.writeFileSync(
+      path.join(tempDir, ".supply-chain-guard.yml"),
+      ["ignore:", "  - .claude/**"].join("\n"),
+    );
+    const deepSkill = path.join(
+      tempDir,
+      ".claude",
+      "skills",
+      ...Array.from({ length: 10 }, (_, index) => `level-${index}`),
+      "SKILL.md",
+    );
+    fs.mkdirSync(path.dirname(deepSkill), { recursive: true });
+    fs.writeFileSync(deepSkill, "<|im_start|>system hidden", "utf-8");
+
+    const report = await scan({ target: tempDir, format: "text" });
+
+    expect(
+      report.findings.some(
+        (finding) =>
+          finding.rule === "PATH_SCAN_INCOMPLETE" &&
+          (finding.file ?? "").startsWith(".claude/"),
+      ),
+    ).toBe(false);
+    expect(report.partialScan ?? false).toBe(false);
+  });
+
+  it.skipIf(
+    process.platform === "win32" ||
+    typeof process.getuid !== "function" ||
+    process.getuid() === 0,
+  )("should globally deduplicate main and specialized path coverage", async () => {
+    const cargoLock = path.join(tempDir, "Cargo.lock");
+    fs.writeFileSync(cargoLock, "version = 3", "utf-8");
+    fs.chmodSync(cargoLock, 0o000);
+    try {
+      const report = await scan({ target: tempDir, format: "text" });
+      const coverage = report.findings.filter(
+        (finding) =>
+          finding.rule === "PATH_SCAN_INCOMPLETE" &&
+          finding.file === "Cargo.lock",
+      );
+
+      expect(coverage).toHaveLength(1);
+      expect(report.partialScan).toBe(true);
+    } finally {
+      fs.chmodSync(cargoLock, 0o600);
+    }
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "should scan contained symlinks by public path and reject escapes and cycles",
+    async () => {
+      const internalTarget = path.join(tempDir, "payload.data");
+      fs.writeFileSync(internalTarget, 'eval(atob("aW50ZXJuYWw="));');
+      fs.symlinkSync("payload.data", path.join(tempDir, "public.js"), "file");
+
+      const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "scg-outside-scan-"));
+      try {
+        const marker = "OUTSIDE_SCAN_MARKER_91c4";
+        const outside = path.join(outsideDir, "outside.data");
+        fs.writeFileSync(outside, `eval(atob("${marker}"));`);
+        fs.symlinkSync(outside, path.join(tempDir, "escape.js"), "file");
+        const loop = path.join(tempDir, "loop");
+        fs.mkdirSync(loop);
+        fs.symlinkSync(tempDir, path.join(loop, "cycle"), "dir");
+
+        const report = await scan({ target: tempDir, format: "json" });
+
+        expect(report.findings).toEqual(expect.arrayContaining([
+          expect.objectContaining({ rule: "EVAL_ATOB", file: "public.js" }),
+          expect.objectContaining({ rule: "PATH_SCAN_INCOMPLETE", file: "escape.js" }),
+          expect.objectContaining({ rule: "PATH_SCAN_INCOMPLETE", file: "loop/cycle" }),
+        ]));
+        expect(report.findings.some((finding) =>
+          finding.rule === "EVAL_ATOB" && finding.file === "escape.js",
+        )).toBe(false);
+        expect(JSON.stringify(report)).not.toContain(marker);
+        expect(report.partialScan).toBe(true);
+      } finally {
+        fs.rmSync(outsideDir, { recursive: true, force: true });
+      }
+    },
+  );
+  it("should honor an inline scg-ignore-next-line directive during a scan", async () => {
+    fs.writeFileSync(
+      path.join(tempDir, "inline.js"),
+      [
+        "// scg-ignore-next-line EVAL_ATOB reviewed",
+        'eval(atob("dGVzdA=="));', // line 2 - suppressed by the directive above
+        'eval(atob("dGVzdA=="));', // line 3 - still reported
+      ].join("\n"),
+    );
+
+    const report = await scan({ target: tempDir, format: "text" });
+
+    const evalFindings = report.findings.filter((f) => f.rule === "EVAL_ATOB");
+    expect(evalFindings).toHaveLength(1);
+    expect(evalFindings[0].line).toBe(3);
   });
 });

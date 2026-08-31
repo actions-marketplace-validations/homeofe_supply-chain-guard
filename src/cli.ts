@@ -8,6 +8,10 @@
  */
 
 import { Command } from "commander";
+import * as fs from "node:fs";
+import { globalAgent as httpGlobalAgent } from "node:http";
+import { globalAgent as httpsGlobalAgent } from "node:https";
+import * as path from "node:path";
 import { scan } from "./scanner.js";
 import { scanNpmPackage } from "./npm-scanner.js";
 import { scanPypiPackage } from "./pypi-scanner.js";
@@ -23,17 +27,169 @@ import {
   listWatchlist,
   monitorWatchlist,
 } from "./solana-monitor.js";
-import { formatReport } from "./reporter.js";
+import { formatReport, getFindingsExitCode, getReportExitCode } from "./reporter.js";
 import type { ScanOptions, Severity } from "./types.js";
 
 const program = new Command();
+
+const SEVERITY_RANK: Record<Severity, number> = {
+  critical: 4,
+  high: 3,
+  medium: 2,
+  low: 1,
+  info: 0,
+};
+
+function parseSeverityOption(
+  value: string | undefined,
+  flag: "--min-severity" | "--fail-on",
+): Severity | undefined {
+  if (value === undefined) return undefined;
+  if (!Object.hasOwn(SEVERITY_RANK, value)) {
+    throw new Error(
+      `${flag} must be one of: critical, high, medium, low, info (received "${value}").`,
+    );
+  }
+  return value as Severity;
+}
+
+function assertCompatibleSeverityThresholds(
+  minSeverity: Severity | undefined,
+  failOn: Severity | undefined,
+): void {
+  if (minSeverity === undefined) return;
+  const effectiveFailOn = failOn ?? "high";
+  if (SEVERITY_RANK[minSeverity] <= SEVERITY_RANK[effectiveFailOn]) return;
+
+  const gate = failOn === undefined
+    ? "the default high gate"
+    : `--fail-on ${failOn}`;
+  throw new Error(
+    `--min-severity ${minSeverity} would hide findings required by ${gate}. ` +
+      "Choose a minimum severity at or below the fail threshold.",
+  );
+}
+
+function parseDefaultGatedMinSeverity(value: string | undefined): Severity | undefined {
+  const minSeverity = parseSeverityOption(value, "--min-severity");
+  assertCompatibleSeverityThresholds(minSeverity, undefined);
+  return minSeverity;
+}
+
+function finishCliCommand(exitCode: number): void {
+  // Forced process.exit() can truncate a report buffered to a pipe. Close the
+  // scanners' pooled network sockets, set the eventual status, and let Node
+  // drain stdout/stderr naturally.
+  httpGlobalAgent.destroy();
+  httpsGlobalAgent.destroy();
+  process.exitCode = exitCode;
+}
+
+interface OutputPathOption {
+  flag: string;
+  value?: string;
+}
+
+function isMissingPathError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
+function comparablePathKey(value: string): string {
+  // Default Windows and macOS filesystems are case-insensitive. Conservatively
+  // reject case-only writer aliases on Darwin as well; on a case-sensitive APFS
+  // volume this can reject two distinct names, but can never permit overwrite.
+  return process.platform === "win32" || process.platform === "darwin"
+    ? value.toLowerCase()
+    : value;
+}
+
+function canonicalizeMissingOutputPath(value: string): string {
+  let cursor = value;
+  const suffix: string[] = [];
+
+  while (true) {
+    try {
+      const ancestor = fs.realpathSync.native(cursor);
+      return path.resolve(ancestor, ...suffix.reverse());
+    } catch (error) {
+      if (!isMissingPathError(error)) throw error;
+      const parent = path.dirname(cursor);
+      if (parent === cursor) return path.resolve(value);
+      suffix.push(path.basename(cursor));
+      cursor = parent;
+    }
+  }
+}
+
+function canonicalOutputPath(value: string): { pathKey: string; inodeKey?: string } {
+  let canonical = path.resolve(value);
+  const seenSymlinks = new Set<string>();
+
+  // realpath cannot resolve a dangling final symlink. Follow final-component
+  // links explicitly so `target.json` and `alias.json -> target.json` collide
+  // even before either writer creates the target.
+  for (let depth = 0; depth <= 64; depth += 1) {
+    let stat: fs.Stats;
+    try {
+      stat = fs.lstatSync(canonical);
+    } catch (error) {
+      if (!isMissingPathError(error)) throw error;
+      canonical = canonicalizeMissingOutputPath(canonical);
+      break;
+    }
+
+    if (!stat.isSymbolicLink()) {
+      canonical = fs.realpathSync.native(canonical);
+      break;
+    }
+
+    const symlinkKey = comparablePathKey(fs.realpathSync.native(path.dirname(canonical)) +
+      path.sep + path.basename(canonical));
+    if (seenSymlinks.has(symlinkKey) || depth === 64) {
+      throw new Error("An output path contains a symbolic-link cycle.");
+    }
+    seenSymlinks.add(symlinkKey);
+
+    const target = fs.readlinkSync(canonical);
+    const physicalParent = fs.realpathSync.native(path.dirname(canonical));
+    canonical = path.resolve(physicalParent, target);
+  }
+
+  const pathKey = comparablePathKey(canonical);
+  try {
+    const stat = fs.statSync(canonical, { bigint: true });
+    return { pathKey, inodeKey: `${stat.dev}:${stat.ino}` };
+  } catch (error) {
+    if (!isMissingPathError(error)) throw error;
+    return { pathKey };
+  }
+}
+
+function assertDistinctOutputPaths(options: OutputPathOption[]): void {
+  const seenPaths = new Map<string, string>();
+  const seenInodes = new Map<string, string>();
+  for (const option of options) {
+    if (!option.value) continue;
+    const { pathKey, inodeKey } = canonicalOutputPath(option.value);
+    const previous = seenPaths.get(pathKey) ??
+      (inodeKey === undefined ? undefined : seenInodes.get(inodeKey));
+    if (previous !== undefined) {
+      throw new Error(
+        `${option.flag} must not target the same file as ${previous}.`,
+      );
+    }
+    seenPaths.set(pathKey, option.flag);
+    if (inodeKey !== undefined) seenInodes.set(inodeKey, option.flag);
+  }
+}
 
 program
   .name("supply-chain-guard")
   .description(
     "Open-source supply-chain security scanner. Detects GlassWorm and similar malware campaigns in npm packages, PyPI packages, code repos, VS Code extensions, and project dependencies.",
   )
-  .version("5.2.0");
+  .version("6.0.7");
 
 // ── scan command ────────────────────────────────────────────────────
 
@@ -41,7 +197,12 @@ program
   .command("scan")
   .description("Scan a local directory or GitHub repo for malware indicators")
   .argument("<target>", "Local directory path or GitHub repo URL")
-  .option("-f, --format <format>", "Output format: text, json, markdown, sarif, sbom, html", "text")
+  .option("-f, --format <format>", "Output format: text, json, markdown, sarif, sbom, html, badge, gitlab, junit", "text")
+  .option("-o, --output <file>", "Write the formatted report to a file instead of stdout")
+  .option(
+    "--json-output <file>",
+    "Write a canonical JSON copy from the same scan (for CI format reconciliation)",
+  )
   .option(
     "-s, --min-severity <severity>",
     "Minimum severity to report: critical, high, medium, low, info",
@@ -62,11 +223,16 @@ program
   .option("--export-fixes", "Show fix suggestions for automatable findings")
   .option("--export-graph <format>", "Export attack graph (json or mermaid)")
   .option("--sbom-output <file>", "Write CycloneDX 1.6 SBOM to a separate file")
+  .option("--no-history", "Do not write risk history to .scg-history/ in the scanned repo")
+  .option("--check-registry", "Compare the local package.json version against the npm registry 'latest' dist-tag (requires network; off by default)")
+  .option("--all-findings", "Show every finding in text output instead of grouping repeated rule/file matches")
   .action(
     async (
       target: string,
       opts: {
         format: string;
+        output?: string;
+        jsonOutput?: string;
         minSeverity?: string;
         exclude?: string;
         depth: string;
@@ -78,20 +244,43 @@ program
         exportFixes?: boolean;
         exportGraph?: string;
         sbomOutput?: string;
+        history: boolean;
+        checkRegistry?: boolean;
+        allFindings?: boolean;
       },
     ) => {
       try {
+        const minSeverity = parseSeverityOption(opts.minSeverity, "--min-severity");
+        const failOn = parseSeverityOption(opts.failOn, "--fail-on");
+        assertCompatibleSeverityThresholds(minSeverity, failOn);
+        assertDistinctOutputPaths([
+          { flag: "--output", value: opts.output },
+          { flag: "--json-output", value: opts.jsonOutput },
+          { flag: "--save-baseline", value: opts.saveBaseline },
+          { flag: "--sbom-output", value: opts.sbomOutput },
+        ]);
+
         const options: ScanOptions = {
           target,
           format: opts.format as ScanOptions["format"],
-          minSeverity: opts.minSeverity as Severity | undefined,
+          minSeverity,
           excludeRules: opts.exclude?.split(",").map((r) => r.trim()),
           maxDepth: parseInt(opts.depth, 10),
           baselineFile: opts.baseline,
           sinceCommit: opts.since,
+          noHistory: opts.history === false,
+          checkRegistry: opts.checkRegistry === true,
         };
 
         const report = await scan(options);
+
+        // CI can request a canonical JSON copy from this exact in-memory report
+        // while stdout uses another formatter. This avoids a second scan whose
+        // network or filesystem state could produce a contradictory verdict.
+        if (opts.jsonOutput) {
+          const { writeFileSync } = await import("node:fs");
+          writeFileSync(opts.jsonOutput, formatReport(report, "json"), "utf-8");
+        }
 
         // Save baseline if requested
         if (opts.saveBaseline) {
@@ -105,7 +294,18 @@ program
           const { exportIncidentMarkdown } = await import("./soc-exporter.js");
           console.log(exportIncidentMarkdown(report));
         } else {
-          console.log(formatReport(report, options.format));
+          const formatted = formatReport(report, options.format, {
+            allFindings: opts.allFindings === true,
+          });
+          // --output writes the report to a file (mirrors --sbom-output); status
+          // messages still go to stderr so the file stays pure report content.
+          if (opts.output) {
+            const { writeFileSync } = await import("node:fs");
+            writeFileSync(opts.output, formatted, "utf-8");
+            console.error(`Report written to ${opts.output} (${options.format})`);
+          } else {
+            console.log(formatted);
+          }
         }
 
         // Export attack graph if requested
@@ -118,11 +318,26 @@ program
           }
         }
 
-        // Write SBOM to separate file if requested
+        // Write SBOM to separate file if requested.
+        //
+        // v5.30 (issue 198): this goes through the SAME renderer as
+        // `--format sbom`. It used to serialise report.sbomDocument directly
+        // unless the scan was partial, so the file carried no `vulnerabilities`
+        // key at all while stdout carried one entry per finding - two
+        // different documents from one scan, both presented by the README as
+        // the same artefact. The FILE moved, because the stdout document is the
+        // complete one and making stdout match the file would have deleted the
+        // findings from the SBOM instead of adding them to it.
         if (opts.sbomOutput && report.sbomDocument) {
           const { writeFileSync } = await import("node:fs");
-          writeFileSync(opts.sbomOutput, JSON.stringify(report.sbomDocument, null, 2), "utf-8");
-          console.error(`SBOM written to ${opts.sbomOutput} (CycloneDX 1.6, ${report.sbomDocument.components.length} components)`);
+          const { describeInventoryCoverage } = await import("./sbom-generator.js");
+          writeFileSync(opts.sbomOutput, formatReport(report, "sbom"), "utf-8");
+          // A bare component count cannot distinguish "this project has no
+          // components" from "this ecosystem was not read" (issue 195), so the
+          // coverage sentence the document itself carries is printed with it.
+          console.error(
+            `SBOM written to ${opts.sbomOutput} (CycloneDX 1.6, ${report.sbomDocument.components.length} components; ${describeInventoryCoverage(report.sbomDocument)})`,
+          );
         }
 
         // Show fix suggestions if requested
@@ -137,30 +352,12 @@ program
           console.error("");
         }
 
-        // Exit code logic
-        if (opts.failOn) {
-          const severityOrder: Record<string, number> = {
-            critical: 4, high: 3, medium: 2, low: 1, info: 0,
-          };
-          const threshold = severityOrder[opts.failOn] ?? 0;
-          const hasFindings = report.findings.some(
-            (f) => (severityOrder[f.severity] ?? 0) >= threshold,
-          );
-          if (hasFindings) {
-            process.exit(1);
-          }
-        } else {
-          if (report.summary.critical > 0) {
-            process.exit(2);
-          }
-          if (report.summary.high > 0) {
-            process.exit(1);
-          }
-        }
+        // Preserve the report bytes even when the verdict is nonzero.
+        finishCliCommand(getReportExitCode(report, failOn));
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`\n  Error: ${message}\n`);
-        process.exit(1);
+        finishCliCommand(1);
       }
     },
   );
@@ -185,17 +382,13 @@ program
         const report = await scanNpmPackage(packageName, {
           target: packageName,
           format: opts.format as "text" | "json" | "markdown" | "sarif" | "sbom",
-          minSeverity: opts.minSeverity as Severity | undefined,
+          minSeverity: parseDefaultGatedMinSeverity(opts.minSeverity),
         });
 
         console.log(formatReport(report, opts.format as "text" | "json" | "markdown" | "sarif" | "sbom"));
 
-        if (report.summary.critical > 0) {
-          process.exit(2);
-        }
-        if (report.summary.high > 0) {
-          process.exit(1);
-        }
+        const exitCode = getReportExitCode(report);
+        finishCliCommand(exitCode);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`\n  Error: ${message}\n`);
@@ -224,17 +417,13 @@ program
         const report = await scanPypiPackage(packageName, {
           target: packageName,
           format: opts.format as "text" | "json" | "markdown" | "sarif" | "sbom",
-          minSeverity: opts.minSeverity as Severity | undefined,
+          minSeverity: parseDefaultGatedMinSeverity(opts.minSeverity),
         });
 
         console.log(formatReport(report, opts.format as "text" | "json" | "markdown" | "sarif" | "sbom"));
 
-        if (report.summary.critical > 0) {
-          process.exit(2);
-        }
-        if (report.summary.high > 0) {
-          process.exit(1);
-        }
+        const exitCode = getReportExitCode(report);
+        finishCliCommand(exitCode);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`\n  Error: ${message}\n`);
@@ -257,26 +446,33 @@ program
     "-s, --min-severity <severity>",
     "Minimum severity to report",
   )
+  .option(
+    "--registry <registry>",
+    "Extension registry for ID targets: marketplace, openvsx",
+    "marketplace",
+  )
   .action(
     async (
       target: string,
-      opts: { format: string; minSeverity?: string },
+      opts: { format: string; minSeverity?: string; registry: string },
     ) => {
       try {
+        if (opts.registry !== "marketplace" && opts.registry !== "openvsx") {
+          throw new Error(
+            `Unknown registry "${opts.registry}". Expected "marketplace" or "openvsx".`,
+          );
+        }
         const report = await scanVscodeExtension({
           target,
           format: opts.format as "text" | "json" | "markdown" | "sarif" | "sbom",
-          minSeverity: opts.minSeverity as Severity | undefined,
+          minSeverity: parseDefaultGatedMinSeverity(opts.minSeverity),
+          registry: opts.registry as "marketplace" | "openvsx",
         });
 
         console.log(formatReport(report, opts.format as "text" | "json" | "markdown" | "sarif" | "sbom"));
 
-        if (report.summary.critical > 0) {
-          process.exit(2);
-        }
-        if (report.summary.high > 0) {
-          process.exit(1);
-        }
+        const exitCode = getReportExitCode(report);
+        finishCliCommand(exitCode);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`\n  Error: ${message}\n`);
@@ -306,18 +502,14 @@ program
         const report = await scanDependencyConfusion({
           target,
           format: opts.format as "text" | "json" | "markdown" | "sarif" | "sbom",
-          minSeverity: opts.minSeverity as Severity | undefined,
+          minSeverity: parseDefaultGatedMinSeverity(opts.minSeverity),
           includeDevDeps: opts.dev,
         });
 
         console.log(formatReport(report, opts.format as "text" | "json" | "markdown" | "sarif" | "sbom"));
 
-        if (report.summary.critical > 0) {
-          process.exit(2);
-        }
-        if (report.summary.high > 0) {
-          process.exit(1);
-        }
+        const exitCode = getReportExitCode(report);
+        finishCliCommand(exitCode);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`\n  Error: ${message}\n`);
@@ -332,7 +524,7 @@ program
   .command("repo")
   .description("Analyze a GitHub repository for trust signals and malware indicators")
   .argument("<url>", "GitHub repository URL (e.g., https://github.com/owner/repo)")
-  .option("-f, --format <format>", "Output format: text, json, markdown, sarif, sbom, html", "text")
+  .option("-f, --format <format>", "Output format: text, json, markdown, sarif, sbom, html, badge, gitlab, junit", "text")
   .action(
     async (
       url: string,
@@ -371,12 +563,8 @@ program
 
         console.log(formatReport(report, opts.format as ScanOptions["format"]));
 
-        if (report.summary.critical > 0) {
-          process.exit(2);
-        }
-        if (report.summary.high > 0) {
-          process.exit(1);
-        }
+        const exitCode = getReportExitCode(report);
+        finishCliCommand(exitCode);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`\n  Error: ${message}\n`);
@@ -404,18 +592,27 @@ program
 
         if (repos.length === 0) {
           console.error(`\n  No repos found for org "${org}". Is gh CLI authenticated?\n`);
-          process.exit(1);
+          finishCliCommand(1);
+          return;
         }
 
         console.error(`\n  Scanning ${repos.length} repos in ${org}...\n`);
 
         const repoFindings = new Map<string, import("./types.js").Finding[]>();
+        let completedRepos = 0;
+        let partialRepos = 0;
+        let failedRepos = 0;
+        let orgExitCode: 0 | 1 | 2 = 0;
         for (const repoUrl of repos) {
           try {
             const report = await scan({
               target: repoUrl,
               format: opts.format as ScanOptions["format"],
             });
+            completedRepos++;
+            if (report.partialScan) partialRepos++;
+            const repoExitCode = getReportExitCode(report);
+            if (repoExitCode > orgExitCode) orgExitCode = repoExitCode;
             repoFindings.set(repoUrl, report.findings);
             const critCount = report.findings.filter((f) => f.severity === "critical").length;
             const highCount = report.findings.filter((f) => f.severity === "high").length;
@@ -423,15 +620,32 @@ program
               console.error(`  ${repoUrl}: ${critCount} critical, ${highCount} high`);
             }
           } catch {
+            failedRepos++;
             console.error(`  ${repoUrl}: scan failed`);
           }
         }
 
         const orgFindings = analyzeOrgFindings(repoFindings);
+        const synthesizedExitCode = getFindingsExitCode(orgFindings);
+        if (synthesizedExitCode > orgExitCode) orgExitCode = synthesizedExitCode;
+        const partialScan = partialRepos > 0 || failedRepos > 0;
         if (opts.format === "json") {
-          console.log(JSON.stringify({ org, reposScanned: repos.length, findings: orgFindings }, null, 2));
+          console.log(JSON.stringify({
+            org,
+            reposScanned: completedRepos,
+            ...(partialScan ? { partialScan: true, partialRepos, failedRepos } : {}),
+            findings: orgFindings,
+          }, null, 2));
         } else {
-          console.log(`\n  Organization: ${org} (${repos.length} repos scanned)`);
+          const repoCountLabel = partialScan
+            ? `${completedRepos} of ${repos.length}`
+            : `${repos.length}`;
+          console.log(`\n  Organization: ${org} (${repoCountLabel} repos scanned)`);
+          if (partialScan) {
+            console.log(
+              `  WARNING: Partial scan (${partialRepos} incomplete, ${failedRepos} failed). No clean organization verdict can be established.`,
+            );
+          }
           if (orgFindings.length === 0) {
             console.log("  No cross-repo patterns detected.\n");
           } else {
@@ -441,10 +655,12 @@ program
             console.log("");
           }
         }
+
+        finishCliCommand(orgExitCode !== 0 ? orgExitCode : partialScan ? 1 : 0);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(`\n  Error: ${message}\n`);
-        process.exit(1);
+        finishCliCommand(1);
       }
     },
   );
@@ -617,5 +833,233 @@ watchlist
       }
     },
   );
+
+// -- feed command ------------------------------------------------------------
+
+const feedCmd = program
+  .command("feed")
+  .description("Inspect and refresh the threat-intel IOC feed");
+
+feedCmd
+  .command("stats")
+  .description("Show IOC entry counts, and how old the rule set is, by type and severity (offline)")
+  .option("-f, --format <format>", "Output format: text, json", "text")
+  .action(async (opts: { format: string }) => {
+    try {
+      const { getBundledFeed, loadThreatIntel, getFeedCacheState } = await import("./threat-intel.js");
+      const { feedStats, feedFreshness, FEED_STALE_AFTER_DAYS } = await import("./feed.js");
+      const bundled = getBundledFeed();
+      const effective = loadThreatIntel();
+      const stats = feedStats(effective);
+      // Age of what a scan would actually match against, and of the pin on its
+      // own, so the two are distinguishable: a refreshed cache can make an old
+      // pin current, and only the pair shows that.
+      const freshness = feedFreshness(effective);
+      const bundledFreshness = feedFreshness(bundled);
+      // Must be read AFTER loadThreatIntel(), which is what populates it.
+      const cache = getFeedCacheState();
+
+      if (opts.format === "json") {
+        console.log(
+          JSON.stringify(
+            {
+              bundledEntries: bundled.length,
+              ...stats,
+              freshness,
+              bundledFreshness,
+              staleAfterDays: FEED_STALE_AFTER_DAYS,
+              cache: {
+                present: cache.present,
+                entryCount: cache.entryCount,
+                ageHours: cache.ageMs === undefined ? null : Math.round(cache.ageMs / 3600000),
+                refreshDue: cache.stale,
+              },
+            },
+            null,
+            2,
+          ),
+        );
+        return;
+      }
+
+      const describeAge = (f: typeof freshness): string =>
+        f.ageDays === null || f.newestIndicator === null
+          ? "unknown (no indicator carries a usable date)"
+          : `${f.ageDays} day(s), newest indicator ${f.newestIndicator}${f.stale ? "  [STALE]" : ""}`;
+
+      console.log(`\n  Threat-intel feed statistics:\n`);
+      console.log(`  Bundled entries:   ${bundled.length}`);
+      console.log(`  Effective entries: ${stats.total} (bundled + refreshed cache)`);
+      if (cache.present) {
+        const hrs = cache.ageMs === undefined ? null : Math.round(cache.ageMs / 3600000);
+        console.log(
+          `  Refreshed cache:   ${cache.entryCount} entries` +
+            (hrs === null ? "" : `, ${hrs}h old`) +
+            (cache.stale ? "  [refresh due]" : ""),
+        );
+      } else {
+        console.log(
+          `  Refreshed cache:   none - run \`supply-chain-guard feed refresh\` for same-day IOCs`,
+        );
+      }
+      console.log(`\n  Rule-set age (stale after ${FEED_STALE_AFTER_DAYS} days):`);
+      console.log(`    bundled with this version  ${describeAge(bundledFreshness)}`);
+      console.log(`    effective at scan time     ${describeAge(freshness)}`);
+      if (freshness.stale) {
+        console.log(
+          `\n  This rule set is stale. Scanning is offline, so indicators published\n` +
+            `  after that date cannot be detected. Update the package, or run\n` +
+            `  \`supply-chain-guard feed refresh\` before scanning.`,
+        );
+      }
+      if (cache.stale) {
+        console.log(
+          `\n  The refreshed cache is over 24h old. Its ${cache.entryCount} entries are STILL\n` +
+            `  being matched - stale intel is not discarded - but anything published\n` +
+            `  since then is missing. Run \`supply-chain-guard feed refresh\` to top it up.`,
+        );
+      }
+      console.log(`\n  By type:`);
+      for (const [type, count] of Object.entries(stats.byType)) {
+        console.log(`    ${type.padEnd(10)} ${count}`);
+      }
+      console.log(`\n  By severity:`);
+      for (const [severity, count] of Object.entries(stats.bySeverity)) {
+        console.log(`    ${severity.padEnd(10)} ${count}`);
+      }
+      console.log("");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`\n  Error: ${message}\n`);
+      process.exit(1);
+    }
+  });
+
+feedCmd
+  .command("refresh")
+  .description(
+    "Download the published IOC feed into the local cache for same-day protection (default source: the project's feed.json on GitHub main)",
+  )
+  .option("-u, --url <url>", "Feed URL to download instead of the default")
+  .option("-c, --cache-dir <dir>", "Cache directory to write to (default: .scg-cache)")
+  .action(async (opts: { url?: string; cacheDir?: string }) => {
+    try {
+      const { refreshFeed, DEFAULT_FEED_URL } = await import("./feed.js");
+      const result = await refreshFeed(opts.url ?? DEFAULT_FEED_URL, opts.cacheDir);
+      console.log(`\n  Threat feed refreshed: ${result.entryCount} entries cached.`);
+      console.log(`  Cache file: ${result.cachePath}`);
+      console.log(`  Every scan from now on merges these entries over the bundled feed.`);
+      console.log(`  They do not expire; refresh daily to keep picking up new IOCs.\n`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`\n  Error: ${message}\n`);
+      process.exit(1);
+    }
+  });
+
+feedCmd
+  .command("osv")
+  .description(
+    "Export the feed's malicious-package IOCs as OSV records (osv.dev schema) for osv-scanner / ossf-malicious-packages consumption (offline)",
+  )
+  .option("-o, --out <file>", "Write the OSV JSON to a file instead of stdout")
+  .action(async (opts: { out?: string }) => {
+    try {
+      const { getBundledFeed } = await import("./threat-intel.js");
+      const { toOsvRecords } = await import("./osv-export.js");
+      const records = toOsvRecords(getBundledFeed());
+      const json = JSON.stringify(records, null, 2);
+      if (opts.out) {
+        const { writeFileSync } = await import("node:fs");
+        writeFileSync(opts.out, json, "utf-8");
+        console.error(`\n  Wrote ${records.length} OSV records to ${opts.out}\n`);
+      } else {
+        console.log(json);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`\n  Error: ${message}\n`);
+      process.exit(1);
+    }
+  });
+
+// ── mcp command ─────────────────────────────────────────────────────
+
+program
+  .command("mcp")
+  .description("Start an MCP server exposing supply-chain-guard tools over stdio")
+  .action(async () => {
+    const { startMcpServer } = await import("./mcp-server.js");
+    startMcpServer();
+  });
+
+// ── guard command ───────────────────────────────────────────────────
+
+// Required so the guard command can pass the manager's own flags through
+// untouched (passThroughOptions below); program-level options (-V/-h) keep
+// working before the subcommand name, which is the only place they were
+// ever recognized.
+program.enablePositionalOptions();
+
+program
+  .command("guard")
+  .description(
+    "Run an install command through the offline IOC blocklist first; known-bad packages block the install (exit 2)",
+  )
+  .passThroughOptions()
+  .argument("<manager>", "Package manager: npm, pnpm, yarn, bun")
+  .argument("[managerArgs...]", "Arguments passed to the package manager unchanged")
+  .option("--force", "Proceed despite findings (loud warning)")
+  .option("--dry-run", "Check only; never invoke the package manager")
+  .action(
+    async (
+      manager: string,
+      managerArgs: string[],
+      opts: { force?: boolean; dryRun?: boolean },
+    ) => {
+      try {
+        const { runInstallGuard } = await import("./install-guard.js");
+        const code = runInstallGuard(manager, managerArgs, {
+          force: opts.force,
+          dryRun: opts.dryRun,
+        });
+        finishCliCommand(code);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`\n  Error: ${message}\n`);
+        finishCliCommand(1);
+      }
+    },
+  );
+
+// ── internal-hash command ───────────────────────────────────────────────
+
+program
+  .command("internal-hash")
+  .description(
+    "Print the sha256 digest of one or more internal terms for internalDisclosure.hashedTerms (the digest is safe to commit, the term is not)",
+  )
+  .argument("<terms...>", "Terms to hash: a hostname, an org/repo name, a path fragment")
+  .action(async (terms: string[]) => {
+    const { hashInternalTerm, INTERNAL_HASH_SALT_ENV } = await import(
+      "./internal-disclosure.js"
+    );
+    // An optional salt, read from the environment rather than an argument so
+    // it never reaches the shell history or the process list. It has to live
+    // outside the repository to be worth anything: a salt stored next to the
+    // digests is hashed by the same attacker who reads them.
+    const salt = process.env[INTERNAL_HASH_SALT_ENV] ?? null;
+    if (salt) {
+      console.error(
+        `  Salted with $${INTERNAL_HASH_SALT_ENV}. Set internalDisclosure.hashSalted: true so a scan without the salt is reported instead of silently matching nothing.`,
+      );
+    }
+    // One digest per line, nothing else. The plaintext term is deliberately
+    // NOT echoed: the output of this command is meant to be pasted into a
+    // committed config file, and an echoed term would travel with it.
+    for (const term of terms) {
+      console.log(hashInternalTerm(term, salt));
+    }
+  });
 
 program.parse();

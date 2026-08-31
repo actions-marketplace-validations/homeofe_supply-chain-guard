@@ -1,0 +1,36 @@
+// Jenkins declarative pipeline for supply-chain-guard.
+// Copy the whole file as your Jenkinsfile, or lift the stage and post
+// blocks into an existing declarative pipeline.
+//
+// The stage runs the CLI via "npx --yes" (one-shot download into the npm
+// cache, no global install, no root, no PATH surgery), scans the repository
+// with JSON output and fails the build on high or critical findings. The
+// report is archived as a build artifact even when the scan fails.
+//
+// For reproducible CI, pin the scanner version instead of @latest, e.g.
+// "npx --yes supply-chain-guard@X.Y.Z ..." (trades same-day feed freshness
+// for a fixed toolchain; bump it on a schedule).
+//
+// Requires the Docker Pipeline plugin.
+
+pipeline {
+    agent {
+        docker {
+            image 'node:22'
+        }
+    }
+
+    stages {
+        stage('Supply Chain Scan') {
+            steps {
+                sh 'npx --yes supply-chain-guard@latest scan . --format json --fail-on high > scg-report.json'
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: 'scg-report.json', allowEmptyArchive: true
+        }
+    }
+}

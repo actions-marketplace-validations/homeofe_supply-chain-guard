@@ -1,5 +1,5 @@
 /**
- * Correlation engine (v4.2) — CORE FEATURE.
+ * Correlation engine (v4.2) - CORE FEATURE.
  *
  * Aggregates individual findings into incident-level clusters.
  * Links related findings, boosts confidence, generates attack narratives,
@@ -17,6 +17,12 @@ interface CorrelationRule {
   rules: string[];
   /** Minimum number of rules that must match (default: all) */
   minMatch?: number;
+  /**
+   * If set, the incident only fires when at least one of these "strong" rule
+   * IDs is among the matches. Guards against a cluster being satisfied entirely
+   * by weak/always-co-occurring hygiene signals (v5.7).
+   */
+  requireAnyOf?: string[];
   /** Incident name when triggered */
   incident: string;
   /** Resulting severity */
@@ -27,7 +33,7 @@ interface CorrelationRule {
   narrative: string;
 }
 
-const CORRELATION_RULES: CorrelationRule[] = [
+export const CORRELATION_RULES: CorrelationRule[] = [
   // --- Known campaigns ---
   {
     rules: ["GLASSWORM_MARKER", "EVAL_ATOB", "ENV_EXFILTRATION", "SOLANA_MAINNET"],
@@ -126,6 +132,76 @@ const CORRELATION_RULES: CorrelationRule[] = [
     narrative: "GitHub Actions workflow downloads and executes remote code while accessing secrets. CI/CD pipeline compromise risk.",
   },
 
+  // --- Cordyceps CI/CD composition (v5.7) ---
+  // The single-file GHA symptoms are individually valid YAML; the attack lives
+  // in how they compose. Any two of these together is a strong signal that a
+  // workflow is exploitable through a trust boundary crossing.
+  {
+    rules: [
+      "GHA_CROSS_WORKFLOW_ARTIFACT_TRUST",
+      "GHA_PWN_REQUEST_CHECKOUT",
+      "GHA_GITHUB_SCRIPT_INJECTION",
+      "GHA_PRIVILEGED_TRIGGER",
+      "GHA_SCRIPT_INJECTION",
+      "GHA_PERMS_WRITE_ALL",
+      "GHA_PERMS_DEFAULT_BROAD",
+    ],
+    minMatch: 2,
+    // The two hygiene rules (GHA_PRIVILEGED_TRIGGER, GHA_PERMS_DEFAULT_BROAD)
+    // always co-occur on an ordinary pull_request_target bot, so 2-of-7 alone
+    // would false-fire a critical incident on benign repos. Require at least one
+    // genuinely-independent strong signal to corroborate.
+    requireAnyOf: [
+      "GHA_CROSS_WORKFLOW_ARTIFACT_TRUST",
+      "GHA_PWN_REQUEST_CHECKOUT",
+      "GHA_GITHUB_SCRIPT_INJECTION",
+      "GHA_SCRIPT_INJECTION",
+      "GHA_PERMS_WRITE_ALL",
+    ],
+    incident: "Cordyceps CI/CD Composition Attack",
+    severity: "critical",
+    confidenceBoost: 0.25,
+    narrative:
+      "Multiple GitHub Actions trust-boundary weaknesses combine into an exploitable chain: a privileged " +
+      "trigger runs attacker-influenced input or artifacts with secrets and a write token. This matches the " +
+      "Cordyceps composition pattern (novee.security, 2026) - no single line is wrong, but together they " +
+      "allow code execution or secret theft across a workflow trust boundary.",
+  },
+
+  // --- GitLost-class agentic workflow exfiltration posture (v5.10) ---
+  // An AI agent that ingests untrusted issue/PR text, holds a cross-repo token,
+  // and can post publicly is the GitLost lethal trifecta (Noma, July 2026). Any
+  // two of these together is a strong static signal of the vulnerable posture.
+  {
+    rules: [
+      "GHA_AGENT_UNTRUSTED_PROMPT",
+      "GHA_AGENT_PUBLIC_POST",
+      "GHA_AGENT_CROSS_REPO_TOKEN",
+      "GHA_AGENT_NO_AUTHOR_GATE",
+      "AGENTIC_WF_UNTRUSTED_TRIGGER",
+      "AGENTIC_WF_PUBLIC_POST_TOOL",
+      "AGENTIC_WF_BROAD_ACCESS",
+    ],
+    minMatch: 2,
+    // The medium hygiene rules (NO_AUTHOR_GATE, UNTRUSTED_TRIGGER) co-occur on
+    // ordinary triage bots, so 2-of-N alone would false-fire. Require at least
+    // one rule that proves the agent actually ingests untrusted input OR can
+    // post publicly (mirrors the Cordyceps requireAnyOf guard).
+    requireAnyOf: [
+      "GHA_AGENT_UNTRUSTED_PROMPT",
+      "GHA_AGENT_PUBLIC_POST",
+      "AGENTIC_WF_PUBLIC_POST_TOOL",
+    ],
+    incident: "GitLost-class Agentic Workflow Exfiltration Posture",
+    severity: "critical",
+    confidenceBoost: 0.2,
+    narrative:
+      "An AI-agent workflow ingests attacker-controllable issue/PR text, can reach cross-repo data, " +
+      "and can post publicly - the GitLost lethal trifecta (Noma Security, July 2026). An unauthenticated " +
+      "attacker who files an issue could prompt-inject the agent into leaking private repository contents " +
+      "through a public comment. Scope the token to one repo, gate on author trust, and remove public-write.",
+  },
+
   // --- Obfuscation + exfil = malware ---
   {
     rules: ["EVAL_ATOB", "HIGH_ENTROPY_STRING", "ENV_EXFILTRATION", "DEAD_DROP_TELEGRAM"],
@@ -213,37 +289,65 @@ export function correlateFindings(findings: Finding[]): CorrelationResult {
   for (const rule of CORRELATION_RULES) {
     const minMatch = rule.minMatch ?? rule.rules.length;
     const matchedRules = rule.rules.filter((r) => ruleSet.has(r));
+    const strongPresent =
+      !rule.requireAnyOf || rule.requireAnyOf.some((r) => ruleSet.has(r));
 
-    if (matchedRules.length >= minMatch) {
+    if (matchedRules.length >= minMatch && strongPresent) {
       const id = `incident-${++clusterId}`;
 
       // Collect all findings matching this correlation
       const clusterFindings = findings.filter((f) => matchedRules.includes(f.rule));
 
-      // Boost confidence on matched findings
+      // Measure baseline member finding confidence before individual boost
+      const baseMemberConfidence =
+        clusterFindings.reduce((sum, f) => sum + (f.confidence ?? 0.8), 0) /
+        clusterFindings.length;
+
+      // Boost confidence on matched findings, and record membership.
+      //
+      // v5.30: membership is a LIST. A finding can be an indicator of several
+      // incidents - DEAD_DROP_STEAM is one of both the Claude Code leak
+      // campaign and the generic infostealer chain - and the single-valued
+      // `correlationId` was overwritten on each pass, so a finding listed under
+      // incident-1 carried "incident-2" and pointed away from the record it
+      // belonged to. `correlationId` is kept as correlationIds[0] for consumers
+      // that already read it.
       for (const f of clusterFindings) {
-        f.correlationId = id;
+        f.correlationIds = [...(f.correlationIds ?? []), id];
+        f.correlationId = f.correlationIds[0];
         f.confidence = Math.min(1.0, (f.confidence ?? 0.8) + rule.confidenceBoost);
       }
 
-      // Calculate compound confidence
-      const avgConfidence = clusterFindings.reduce(
-        (sum, f) => sum + (f.confidence ?? 0.8), 0,
-      ) / clusterFindings.length;
+      // Calculate compound incident confidence (Issue #203).
+      //
+      // Rather than clamping to 1.0 immediately from boosted member findings,
+      // incident confidence measures match strength by weighting base member
+      // confidence against the fraction of the defined attack chain observed
+      // (matchedRules.length / rule.rules.length) plus the rule's boost.
+      const matchRatio = matchedRules.length / rule.rules.length;
+      const rawIncidentConfidence =
+        baseMemberConfidence * (0.4 + 0.6 * matchRatio) +
+        rule.confidenceBoost * matchRatio;
+      const incidentConfidence = Math.min(
+        1.0,
+        Math.max(0.05, Math.round(rawIncidentConfidence * 100) / 100),
+      );
 
       incidents.push({
         id,
         name: rule.incident,
         severity: rule.severity,
-        confidence: Math.min(1.0, avgConfidence),
+        confidence: incidentConfidence,
         findings: clusterFindings,
         narrative: rule.narrative,
         indicators: matchedRules,
+        matchedIndicatorsCount: matchedRules.length,
+        totalIndicatorsCount: rule.rules.length,
       });
 
       riskBoost += Math.round(rule.confidenceBoost * 30);
       insights.push(
-        `${rule.incident}: ${matchedRules.length}/${rule.rules.length} indicators matched (confidence ${(avgConfidence * 100).toFixed(0)}%)`,
+        `${rule.incident}: ${matchedRules.length}/${rule.rules.length} indicators matched (confidence ${(incidentConfidence * 100).toFixed(0)}%)`,
       );
     }
   }

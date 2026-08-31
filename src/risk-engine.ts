@@ -22,6 +22,11 @@ const SEVERITY_WEIGHTS: Record<Severity, number> = {
 export function calculateRiskDimensions(findings: Finding[]): RiskDimensions {
   const repoTrust = calcDimension(findings, [
     "REPO_", "README_LURE_", "RELEASE_", "CAMPAIGN_", "TRUST_",
+    // Internal-disclosure findings describe what the repository publishes
+    // about its owner's infrastructure, so they belong to the repo dimension.
+    // Listing them keeps the family out of the "counted in NO dimension" trap
+    // that the agent-surface rules fell into before v5.10.
+    "INTERNAL_",
   ]);
   const codeRisk = calcDimension(findings, [
     "EVAL_", "FUNCTION_ATOB", "INVISIBLE_UNICODE", "HIGH_ENTROPY",
@@ -35,6 +40,8 @@ export function calculateRiskDimensions(findings: Finding[]): RiskDimensions {
   ]);
   const ciCdRisk = calcDimension(findings, [
     "GHA_", "CI_", "DOCKER_", "IAC_", "CONFIG_",
+    // v5.10: agent-surface rules were previously counted in NO dimension.
+    "AGENTIC_WF_", "SKILL_", "MCP_", "WORKFLOW_", "SLSA_",
   ]);
   const threatIntelMatches = findings.filter(
     (f) => f.rule === "THREAT_INTEL_MATCH" || f.rule.startsWith("IOC_KNOWN_"),
@@ -46,7 +53,9 @@ export function calculateRiskDimensions(findings: Finding[]): RiskDimensions {
     dependencyRisk * 0.30 +
     repoTrust * 0.20 +
     ciCdRisk * 0.15;
-  const overallScore = Math.min(100, Math.round(raw));
+  // A non-zero dimension must never disappear when a small weighted value is
+  // rounded for the public integer score.
+  const overallScore = raw > 0 ? Math.min(100, Math.max(1, Math.round(raw))) : 0;
 
   // Confidence based on number of findings and correlations
   const totalFindings = findings.filter((f) => f.severity !== "info").length;

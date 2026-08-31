@@ -8,6 +8,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Finding, PatternEntry } from "./types.js";
+import { truncateMatch, validatePatternSet } from "./patterns.js";
+import { matchPatternInFile } from "./pattern-scanner.js";
 
 // ---------------------------------------------------------------------------
 // Config patterns
@@ -75,6 +77,8 @@ export const CONFIG_PATTERNS: PatternEntry[] = [
   },
 ];
 
+validatePatternSet("CONFIG_PATTERNS", CONFIG_PATTERNS);
+
 /** Config file names to scan */
 const CONFIG_FILES = new Set([
   ".npmrc",
@@ -100,30 +104,24 @@ export function scanConfigFile(
   relativePath: string,
 ): Finding[] {
   const findings: Finding[] = [];
-  const lines = content.split("\n");
 
   for (const pattern of CONFIG_PATTERNS) {
-    const regex = new RegExp(pattern.pattern, "i");
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i] ?? "";
-      if (line.trimStart().startsWith("#") || line.trimStart().startsWith(";"))
-        continue; // skip comments
-      const match = regex.exec(line);
-      if (match) {
-        findings.push({
-          rule: pattern.rule,
-          description: pattern.description,
-          severity: pattern.severity,
-          file: relativePath,
-          line: i + 1,
-          match:
-            match[0].length > 120
-              ? match[0].substring(0, 120) + "..."
-              : match[0],
-          recommendation: getConfigRecommendation(pattern.rule),
-        });
-      }
+    const hits = matchPatternInFile(pattern, content, relativePath, findings, "i", {
+      skipLine: (line) => {
+        const t = line.trimStart();
+        return t.startsWith("#") || t.startsWith(";");
+      },
+    });
+    for (const hit of hits ?? []) {
+      findings.push({
+        rule: pattern.rule,
+        description: pattern.description,
+        severity: pattern.severity,
+        file: relativePath,
+        line: hit.line,
+        match: truncateMatch(hit.text),
+        recommendation: getConfigRecommendation(pattern.rule),
+      });
     }
   }
 

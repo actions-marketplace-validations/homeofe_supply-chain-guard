@@ -1,212 +1,250 @@
 # supply-chain-guard: Next Actions for Incoming Agent
 
-> Priority order. Work top-down.
-> Each item should be self-contained so the agent can start without asking questions.
-> Blocked tasks go to the bottom. Completed tasks move to "Recently Completed".
+> MANIFEST.json tasks is authoritative. Work top-down among ready tasks whose
+> dependencies are done. Every implementation task has one canonical
+> **Acceptance criteria** section of task boxes. Check a box only on evidence.
+> Before a task becomes done, each box must be checked, explicitly waived with
+> rationale, or moved to a linked open follow-up.
+
+Five tasks are ready, two are blocked on owner decisions, and T-008/T-015/T-016/T-017/T-018/T-019 are complete.
+
+Current version: **v6.0.7**
 
 ---
 
 ## Status Summary
 
+AAHP 3.9.1 adoption and the verified security hardening are complete. Five
+follow-ups are ready. Two decisions are owner-blocked: the Node/Babel support
+matrix (T-013), and whether `scg npm` should read the refreshed feed the way
+`scg scan` does (T-020).
+
 | Status | Count |
 |--------|-------|
-| Ready | 2 |
-| Blocked | 0 |
-| Done | 15 |
+| Ready | 5 |
+| Blocked | 2 |
+
 
 ---
 
-## Ready - Work These Next
+## T-009: Implement full offline sigstore verification
 
-### T-001: Add solana-monitor unit tests [high]
+**Goal:** Verify DSSE signatures, the Fulcio certificate chain, and Rekor inclusion
+proofs locally without a network dependency.
 
-**Goal:** `src/solana-monitor.ts` (485 lines) has zero test coverage. It handles wallet monitoring, watchlist persistence, and webhook delivery -- all critical paths.
+**Files:** `src/slsa-verifier.ts` and its focused fixtures/tests.
 
-**Context:**
-- The module makes real HTTP calls to `https://api.mainnet-beta.solana.com` via `https.request`
-- Tests must mock `node:https` to avoid network calls
-- Watchlist uses `~/.supply-chain-guard/watchlist.json` for persistence -- tests must use temp dirs
-- Webhook delivery sends HTTP POST on alert -- must be mocked
-
-**What to do:**
-1. Create `src/__tests__/solana-monitor.test.ts`
-2. Mock `node:https` (use `vi.mock` in Vitest)
-3. Test `monitorWallet` detects memo instructions containing suspicious URLs
-4. Test `monitorWallet` ignores normal transactions (no false positives)
-5. Test watchlist load/save/add/remove operations (use `os.tmpdir()` paths)
-6. Test webhook alert fires when a C2 address is detected
-7. Test `getRecentSignatures` handles RPC errors gracefully
-8. Test rate-limit/retry behavior if applicable
-9. Test that the baseline is correctly set on first run (no spurious alerts)
-10. Aim for 15+ tests
-
-**Files:** `src/solana-monitor.ts`, `src/__tests__/solana-monitor.test.ts`
-
-**Definition of done:**
-- [ ] `solana-monitor.test.ts` with 15+ tests, all passing
-- [ ] No real network calls in tests
-- [ ] `npm test` still passes (all 185 + new tests)
-- [ ] DASHBOARD.md updated with new test count
+**Acceptance criteria:**
+- [ ] A valid trusted fixture passes DSSE, certificate-chain, identity, and Rekor inclusion verification offline.
+- [ ] Invalid signatures, identities, chains, timestamps, and inclusion proofs each fail closed in focused adversarial tests.
+- [ ] User-facing partial/verified states and trust-root update behavior are documented.
 
 ---
 
-### T-002: Add reporter unit tests [high]
+## T-010: Add a first-class known-bad VS Code extension-ID IOC type
 
-**Goal:** `src/reporter.ts` (354 lines) formats output as text, JSON, markdown, and SARIF 2.1.0 -- none of this is tested.
+**Goal:** Represent malicious extension IDs as threat intelligence without
+conflating identity matches with behavioral rules.
 
-**Context:**
-- `formatReport(report, format)` is the main entry point
-- SARIF format must be valid SARIF 2.1.0 (has a JSON schema)
-- Text format uses ANSI color codes -- strip these in tests for easy assertion
-- JSON format must be valid JSON with the expected structure
-- Markdown format uses GFM tables
+**Files:** `src/vscode-scanner.ts`, the threat-feed schema, feed generation, and
+focused registry tests.
 
-**What to do:**
-1. Create `src/__tests__/reporter.test.ts`
-2. Build a fixture `ScanReport` with findings of each severity level
-3. Test JSON output: parse result, verify structure (findings array, summary, metadata)
-4. Test SARIF output: parse result, verify `$schema`, `runs[0].results`, severity mapping
-5. Test Markdown output: verify headers, table rows, finding counts
-6. Test Text output: verify findings appear (strip ANSI codes)
-7. Test empty report (no findings): all formats handle gracefully
-8. Test severity-to-SARIF-level mapping: critical/high → error, medium/low → warning, info → note
-9. Aim for 15+ tests
-
-**Files:** `src/reporter.ts`, `src/__tests__/reporter.test.ts`
-
-**Definition of done:**
-- [ ] `reporter.test.ts` with 15+ tests, all passing
-- [ ] SARIF output validated against expected schema structure
-- [ ] `npm test` still passes
+**Acceptance criteria:**
+- [ ] The schema represents normalized `publisher.name` IOCs separately from behavioral findings.
+- [ ] Marketplace and Open VSX scans exact-match the normalized ID with positive, case, boundary, and malformed-ID tests.
+- [ ] Feed compatibility and version-skew behavior are documented and generated feed checks pass.
 
 ---
 
-### T-003: Add CLI integration tests [medium]
+## T-011: Verify the remaining Digest-78 indicator cluster
 
-**Goal:** `src/cli.ts` (420 lines) is the main user-facing entry point and has no automated tests.
+**Goal:** Verify FauxUV and `mcp-server-pg` indicators against primary sources
+before ingestion, without duplicating the wagni entries already present.
 
-**Context:**
-- Built with commander, compiled to `dist/cli.js`
-- Main commands: `scan <path>`, `watchlist add/remove/list`, `monitor <address>`
-- `scan` accepts `--format text|json|markdown|sarif`, `--severity`, `--output`
-- Must build first (`npm run build`) before CLI tests can run
-- Use `child_process.spawnSync` or Vitest's exec helpers to run the compiled CLI
-- Test against fixture directories in `src/__tests__/fixtures/`
+**Files:** `src/threat-intel.ts`, `feed.json`, importer evidence, and feed tests.
 
-**What to do:**
-1. Create `src/__tests__/cli.test.ts`
-2. Create fixture directories: `fixtures/clean-npm-pkg/` and `fixtures/malicious-npm-pkg/`
-3. Test `supply-chain-guard --version` outputs current version
-4. Test `supply-chain-guard --help` shows usage
-5. Test `supply-chain-guard scan <clean-fixture>` exits 0 with no findings
-6. Test `supply-chain-guard scan <malicious-fixture>` exits non-zero with findings
-7. Test `--format json` produces valid JSON output
-8. Test `--format sarif` produces valid SARIF structure
-9. Test `watchlist list` works without error
-10. Test unknown command exits with error code
-
-**Files:** `src/cli.ts`, `src/__tests__/cli.test.ts`, `src/__tests__/fixtures/`
-
-**Definition of done:**
-- [ ] `cli.test.ts` with 10+ tests, all passing
-- [ ] Fixture directories exist with appropriate package.json content
-- [ ] `npm test` still passes
+**Acceptance criteria:**
+- [ ] Every proposed indicator has a recorded primary-source anchor and scoped confidence.
+- [ ] Unverified or ambiguous values are excluded with the reason recorded.
+- [ ] Confirmed values are deduplicated, generated into the feed, and pass validator and matcher regressions.
 
 ---
 
-### T-004: SBOM export (CycloneDX/SPDX) [medium]
+## T-012: Profile structural matcher cost under V8 coverage
 
-**Goal:** Add `--format sbom` output option that emits a CycloneDX 1.5 JSON Software Bill of Materials listing all scanned packages with their detected vulnerabilities.
+**Goal:** Narrow the instrumented performance multiplier without weakening the
+real 5 MiB wall-clock gate.
 
-**Context:**
-- CycloneDX 1.5 JSON schema: https://cyclonedx.org/schema/bom-1.5.schema.json
-- Required fields: `bomFormat`, `specVersion`, `serialNumber`, `version`, `metadata`, `components`, `vulnerabilities`
-- Each finding with severity >= medium maps to a `vulnerabilities` entry
-- Each scanned package becomes a `components` entry
-- This is increasingly required for enterprise/compliance use cases (NIS2, SSDF)
+**Files:** `src/correlated-pattern-matchers.ts`, `src/patterns.ts`,
+`src/internal-disclosure.ts`, and performance tests.
 
-**What to do:**
-1. Add `sbom` to the format union type in `src/types.ts`
-2. Add `formatSbom(report: ScanReport): string` to `src/reporter.ts`
-3. Map findings to CycloneDX vulnerability objects (id = rule ID, ratings = severity)
-4. Map scanned packages to CycloneDX component objects
-5. Add `--format sbom` to CLI help text and docs
-6. Add tests in `reporter.test.ts` for SBOM output structure
-7. Update README with SBOM example
-
-**Files:** `src/reporter.ts`, `src/types.ts`, `src/cli.ts`, `README.md`
+**Acceptance criteria:**
+- [ ] Reproducible baseline and coverage-mode profiles identify the dominant matcher costs.
+- [ ] Any multiplier change is justified by measured data and keeps the real 5 MiB wall-clock gate unchanged.
+- [ ] Focused performance and correctness regressions pass on supported Node lines.
 
 ---
 
-### T-005: --fail-on severity threshold flag [medium]
+## T-014: Remove the external zip dependency from VS Code test fixtures
 
-**Goal:** Add `--fail-on <severity>` flag to `scan` command so CI pipelines can fail builds when findings exceed a threshold.
+**Goal:** Make the 14 archive-fixture tests runnable on Windows without changing
+the production extraction backend or weakening Linux coverage.
 
-**Context:**
-- Current behavior: exits 0 on clean, non-zero on any finding
-- Desired: `--fail-on high` exits non-zero only if there are high/critical findings
-- Useful for tiered pipelines: block on critical/high, warn on medium/low
-- Severity order: critical > high > medium > low > info
+**Files:** VS Code test fixture helpers under `src/__tests__/` and Windows CI.
 
-**What to do:**
-1. Add `--fail-on <severity>` option to `scan` command in `src/cli.ts`
-2. Filter exit code logic: only non-zero if findings >= threshold severity
-3. Add tests in `cli.test.ts` for the flag behavior
-4. Update README with example
-
-**Files:** `src/cli.ts`, `README.md`
+**Acceptance criteria:**
+- [ ] An in-process deterministic fixture builder replaces external `zip` only in tests.
+- [ ] All 14 currently skipped/failing fixture tests pass on Windows without a PATH-installed zip executable.
+- [ ] The same fixtures and the full suite pass in required Linux CI.
 
 ---
 
-### T-006: Cargo/Go module scanner [low]
+## T-020: Decide whether `scg npm` should see refreshed feed entries (BLOCKED on owner)
 
-**Goal:** Add supply-chain scanning for Rust (Cargo.toml/Cargo.lock) and Go (go.mod/go.sum) dependency files.
+**Goal:** Settle a coverage asymmetry that is currently silent, one way or the
+other, deliberately and with tests.
 
-**Context:**
-- Rust: check Cargo.lock for known malicious crate names, suspicious git dependencies, yanked versions
-- Go: check go.sum for known bad modules, direct GitHub dependencies (no proxy), suspicious replace directives
-- Pattern library can be extended from existing `src/patterns.ts` approach
-- Go and Rust ecosystems have had real supply-chain attacks (e.g. malicious crates mimicking popular ones)
+**Blocked by:** Owner decision. This changes what the scanner DETECTS, so it is
+not an implementation detail an agent should pick.
 
-**What to do:**
-1. Create `src/cargo-scanner.ts` (scan Cargo.toml + Cargo.lock)
-2. Create `src/go-scanner.ts` (scan go.mod + go.sum)
-3. Add patterns for known bad crate/module names to `src/patterns.ts`
-4. Wire into `src/scanner.ts` central scanner
-5. Add test files for both scanners
-6. Update README with Cargo/Go examples
+**The measurement.** `src/npm-scanner.ts` reads the bundled feed only.
+`src/scanner.ts` and `src/install-guard.ts` read `loadThreatIntel()`, which
+merges the cache `scg feed refresh` writes. With one synthetic entry in a
+temporary cache directory: bundled 12,962 entries against 12,963 merged; the
+added IOC is a MISS on the npm path and a HIT on the scan path, while a control
+name taken from the bundled feed hits on both. So `scg npm <package>` does not
+see IOCs added by `feed refresh` and `scg scan` does.
+
+**The two options**, both written next to the code in `src/npm-scanner.ts`:
+
+- **A. Keep the bundled feed.** `scg npm` stays hermetic and returns the same
+  verdict on every machine, and never sees a refreshed IOC.
+- **B. Switch to `loadThreatIntel()`.** Coverage matches `scg scan`; index reuse
+  is preserved because that function returns the shared array; the verdict now
+  depends on local cache state.
+
+**Not a performance question.** Issue 177 made this scanner reuse one feed
+reference and left the choice of WHICH feed untouched, on purpose.
+
+**Files:** `src/npm-scanner.ts` (`checkPackageName`, `checkDependencies`), and a
+focused test either way.
+
+**Acceptance criteria:**
+- [ ] The owner records A or B, with the reason, in this file.
+- [ ] The chosen behavior is asserted by a test that fails if the feed source is switched back.
+- [ ] `docs/` states which feed `scg npm` consults, so a user can predict whether `feed refresh` affects it.
 
 ---
 
-### T-007: Rate-limit handling in Solana monitor [low]
+## T-013: Node baseline migration (DONE in v5.28.0)
 
-**Goal:** The Solana RPC endpoint (`api.mainnet-beta.solana.com`) rate-limits aggressive polling. Add exponential backoff and user-configurable rate limiting.
+Closed. The owner decided the direction and it shipped: Node 22 is the canonical
+baseline, `engines.node` is `>=22.0.0`, the npm artifact is published from Node 22, and
+the Action, the container image and the dev container all declare the same major. The
+state where documentation said one thing, CI tested another, publishing used a third and
+distribution executed a fourth no longer exists.
 
-**Context:**
-- Current code polls at a fixed interval without backoff on 429/503
-- Public RPC rate limit: ~100 req/s, but sustained polling can be blocked
-- Should: detect HTTP 429, wait `Retry-After` or exponential backoff, log warning
-- Consider adding `--rpc <url>` flag to allow use of private RPC endpoints
+Node 20 survives only as an explicit transition lane: still running the complete suite,
+below the floor, out of support, and **removed in 5.29.0**. That is not a reminder. The
+policy gate compares `transitionRemovedIn` in `docs/node-support.md` against the version
+in `package.json` and fails the build once the project reaches it while the lane still
+exists, so the release that would carry the transition past its own deadline cannot be
+built.
 
-**What to do:**
-1. Add retry logic with exponential backoff in `src/solana-monitor.ts`
-2. Handle HTTP 429 and 503 responses gracefully
-3. Add `--rpc <url>` option to `monitor` CLI command
-4. Update T-001 tests to cover retry behavior
+**What that leaves for 5.29.0**, and it is mechanical rather than a decision:
+
+1. Set `transitionMajors` to `[]` and drop `transitionRemovedIn` in `docs/node-support.md`.
+2. Run the build. The gate names every file that still refers to Node 20.
+3. Remove the `20` entry from the `compat` matrix in `ci.yml`.
+
+Babel 8 was bundled into this task on the assumption that it was blocked on the same
+Node decision. It is not blocked any more: with the floor at 22, dependency majors that
+declare `engines >= 22` are mergeable. Whether to take Babel 8 is now an ordinary
+dependency call rather than a migration.
+
+**Evidence for the closure:** `src/__tests__/node-version-contract.test.ts`, 28
+assertions, mutation-proved; the complete suite and a clean-room install of the packed
+tarball on both majors in CI; the container image built and scanned on every PR.
+
+---
+
+## Owner decision: should a badly stale rule set fail the build?
+
+`THREAT_FEED_STALE` ships at `medium`, past 30 days. That was chosen so it
+becomes visible almost everywhere (score, risk level, eight of the nine report
+formats, the Action's pull request comment) without turning the default
+`fail-on: critical` gate or the CLI's default `high` gate red for any consumer on
+the day it ships. The ninth format, `badge`, is derived from summary counts and
+never names a rule, so it shows the condition as `1 medium`/`yellow` instead of
+`clean`/`brightgreen`. This paragraph said "every report format" until
+2026-08-22; the measurement is in STATUS.md.
+
+The open question is whether a rule set that is egregiously old, say past 180
+days, should escalate to `high` and therefore fail a `fail-on: high` build. The
+argument for it is that at that point the green check is actively misleading: the
+scan is reporting on a corpus that has missed roughly two hundred releases. The
+argument against it is that it turns a calendar date into a build break in
+repositories that changed nothing, which is exactly the behaviour that gets a
+scanner switched off.
+
+This is a decision about how loud this package is allowed to be inside somebody
+else's pipeline, so it is not being made from inside a pull request. The severity
+lives in `feedStalenessFindings` in `src/feed.ts` and the threshold in
+`FEED_STALE_AFTER_DAYS`; adding a band is a small change once the answer exists.
+
+---
+
+## Ideas / Not Yet Scheduled
+
+- Resolve Install Guard version ranges against the offline metadata cache and add
+  a transparent guard shell shim.
+- Baseline MCP tool-description hashes for rug-pull detection.
+- Publish the prepared MCP server metadata to the official registry and relevant
+  directories.
 
 ---
 
 ## Recently Completed
 
-| ID | Task | Completed |
-|----|------|-----------|
-| T-001 | Add solana-monitor unit tests (23 tests) | 2026-03-26 |
-| T-002 | Add reporter unit tests (39 tests – JSON, SARIF, markdown, text, SBOM) | 2026-03-26 |
-| T-003 | Add CLI integration tests (22 tests) | 2026-03-26 |
-| T-004 | SBOM export (CycloneDX 1.5 JSON) | 2026-03-26 |
-| T-005 | --fail-on severity threshold flag | 2026-03-26 |
-| - | v3.1.0 released (269 tests, all passing) | 2026-03-26 |
-| - | v3.0.0: All features merged to main | 2026-03-26 |
-| - | AAHP handoff docs created (all 8 files) | 2026-03-26 |
-| - | Stale feature branches deleted | 2026-03-26 |
-| - | Dependabot PR #18 merged (picomatch 4.0.4) | 2026-03-26 |
+> Resolution records the closure evidence: commit, PR, test run, live
+> verification, waiver rationale, or linked follow-up that satisfied the criteria.
+
+| Item | Resolution |
+|------|------------|
+| T-016: pinned npm IOCs were unreachable from `scan` | Done: matched in the lockfile path, the only place a RESOLVED version exists. False-positive surface measured at zero across 43 repos / 10,615 resolved deps before shipping. Bare-name entries excluded there to avoid double-reporting across the transitive tree. |
+| T-017: matchBareNpmIOC was a linear scan per call | Done: indexed on a WeakMap keyed by feed identity, with the linear implementation kept as `matchBareNpmIOCLinear` and a parity suite asserting the two agree across the whole bundled feed. collection-reachability went from 3,317ms to 21ms and its 30s stopgap is removed. |
+| T-019: dropped-persistence detection | Done in two tranches: `.vscode/tasks.json` recall, `CHAINDROP_GH_TOKEN_MONITOR_PERSISTENCE` (also wired into the hook scanner, since the core walk excludes `.claude/`), and `INSTALL_HOOK_PERSISTENCE_WRITE`. Coverage of the five published artefacts went from one of five to five of five. |
+| T-018: known-malware hashes never matched a file | Done: `IOC_KNOWN_MALWARE_FILE_DIGEST` computes SHA-256/MD5 per scanned file, before the scannable-extension gate, over raw bytes. The digest-text substring match is kept as a separate signal. |
+| v5.25.5: AAHP shared-primitive convergence | PR #120 merged: AAHP bumped 3.9.1->3.9.2, `aahp-dashboard.mjs` renamed to `scg-handoff-docs.mjs`, two vendored bash files deleted, shared primitives imported instead; PR #119 Action comment fix also included |
+| T-015: packaged self-scan own-definition false positive | Package-shaped trusted/untrusted regressions pass; v5.25.3 is the recovery release |
+| v5.25.2: AAHP 3.9.1 and security hardening | Released 2026-08-04; live install smoke exposed the T-015 packaged self-scan gap |
+| T-008: AAHP 3.9.1 adoption and verified hardening | 247 focused tests, build, audit, independent review, and PR #114 Linux CI passed |
+| v5.25.1: campaign and package IOC update | Released 2026-08-04; feed generation and release gates passed |
+| v5.25.0: ecosystem-scoped importer recovery | Released 2026-08-03; importer and feed regressions passed |
+
+### T-015: Fix packaged self-scan own-definition false positive
+
+**Acceptance criteria:**
+- [x] The fixture mirrors npm package contents: compiled `dist/` included, source
+  and `.gitignore` absent.
+- [x] A trusted own-package scan suppresses only the exact matcher definition;
+  an untrusted copy and injected executable payloads still trigger.
+- [x] Sixteen focused self-scan tests, build, audit, and AAHP gates pass; required
+  Linux PR CI remains the release gate.
+
+**Resolution:** Completed 2026-08-04 from the published v5.25.2 reproduction,
+an exact path/rule exemption, package-shaped trusted/untrusted regressions, and
+an installed candidate tarball self-scan with zero critical/high findings.
+
+### T-008: Adopt AAHP 3.9.1 and close verified scanner and CI defects
+
+**Acceptance criteria:**
+- [x] AAHP is exact-pinned at 3.9.1, installs without lifecycle scripts, and its npm audit has no high-severity finding.
+- [x] Registry downloads, artifact integrity, self-scan identity, domain IOCs, VS Code identifiers, Solana webhooks, and archive extraction have positive and adversarial focused regressions.
+- [x] TypeScript build and the final focused Windows-safe regression set pass.
+- [x] AAHP lint, doctor, and pre-push verification pass after regeneration; the advisory criteria report runs with no actionable findings.
+- [x] STATUS.md records the exact local and required Linux CI evidence.
+
+**Resolution:** Completed 2026-08-04 with 13 focused files / 247 tests,
+`npm run build`, zero high-severity audit findings, AAHP 3.9.1 lint/doctor/prepush,
+a bounded independent review, and the required PR #114 Linux full suite and AAHP gates.

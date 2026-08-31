@@ -1,0 +1,31 @@
+# Keep ESM scripts LF so vitest can import them on Windows checkouts
+*.mjs text eol=lf
+
+# Same reason, for shell: with core.autocrlf=true a Windows checkout rewrites these
+# to CRLF, and bash then fails on the stray carriage return with
+# "$'\r': command not found" plus "set: pipefail: invalid option name". That breaks
+# `npm run handoff:refresh`, which shells out to scripts/aahp-manifest.sh to
+# regenerate MANIFEST.json - a required gate for every code commit - so on Windows
+# the handoff check could not be satisfied at all.
+*.sh text eol=lf
+
+# `.ai/handoff/STATUS.md` is an append-log: every pull request prepends its own
+# session note, so two branches almost always differ by one prepended block and
+# nothing else. `union` keeps both sides, which is the correct resolution here
+# and the only one that does not lose somebody's note.
+#
+# Verified for local `git merge`. GitHub does NOT honour merge drivers
+# server-side (measured 2026-07-31 in Shield: two PRs touching STATUS.md still
+# showed as CONFLICTING after a third merged), so a PR touching STATUS.md still
+# needs a local merge before it can land. What this removes is the HAND
+# resolution, not the merge itself. Measured here on 2026-08-23: twenty-two
+# rebases in one session, every one of them resolving this file by hand, in the
+# two repositories that lacked this line while eight siblings had it.
+.ai/handoff/STATUS.md merge=union
+
+# Vendored CycloneDX JSON schemas: unmodified upstream copies whose SHA-256 is
+# recorded in src/__tests__/fixtures/cyclonedx/README.md. With core.autocrlf=true
+# a Windows checkout would rewrite them to CRLF and every recorded checksum would
+# stop matching, so the one check that says "this is still the official schema"
+# could no longer be run.
+src/__tests__/fixtures/cyclonedx/*.json text eol=lf

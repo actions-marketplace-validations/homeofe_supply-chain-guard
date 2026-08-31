@@ -1,0 +1,62 @@
+# Renders the README demo GIF from assets/demo.tape using VHS.
+#
+# Manual trigger only. The GIF is uploaded as a workflow ARTIFACT, not
+# committed by the bot: a bot push to main would change files outside
+# .ai/handoff/ without STATUS.md + MANIFEST.json and fail the AAHP Verify
+# gate. Download the artifact and commit it through the normal gated flow:
+#   gh run download <run-id> --name demo-gif --dir assets/
+name: Render Demo GIF
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    name: Render demo.gif with VHS
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # This job builds the CLI and runs it against a MALICIOUS test fixture.
+          # The token has no business being readable from the same workspace.
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Build and link the CLI from this checkout
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+          npm link --ignore-scripts
+
+      - name: Stage the demo target (malicious test fixture)
+        run: cp -r src/__tests__/fixtures/malicious-npm-pkg ./suspicious-package
+
+      # vhs comes from Charm's official apt repo (vendor-signed); ffmpeg is
+      # preinstalled on ubuntu-24.04 runners. This replaces vhs-action, whose
+      # "install latest ffmpeg" download step is flaky (failed run 28602409278)
+      # and was our only third-party action.
+      - name: Install VHS from the Charm apt repo
+        run: |
+          sudo mkdir -p /etc/apt/keyrings
+          curl -fsSL https://repo.charm.sh/apt/gpg.key | sudo gpg --dearmor -o /etc/apt/keyrings/charm.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" | sudo tee /etc/apt/sources.list.d/charm.list
+          sudo apt-get update -q
+          sudo apt-get install -y -q vhs ttyd
+
+      - name: Render the tape
+        run: vhs assets/demo.tape
+
+      - name: Upload the GIF as an artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: demo-gif
+          path: assets/demo.gif
+          retention-days: 7

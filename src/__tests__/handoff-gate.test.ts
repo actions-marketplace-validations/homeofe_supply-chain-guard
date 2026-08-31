@@ -1,0 +1,279 @@
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { execFileSync } from "node:child_process";
+
+/**
+ * Regression tests for the handoff staleness gate (scripts/scg-handoff-docs.mjs).
+ *
+ * Why this exists: the gate embeds a Toolchain table listing every dependency
+ * and its version straight from package.json. That made EVERY dependency bump
+ * turn `npm run build` red on "Handoff docs are stale: DASHBOARD.md", and
+ * dependabot cannot fix it because its PRs run with a read-only token and it
+ * cannot run `handoff:refresh`. Every dependabot PR therefore arrived red and
+ * needed a human to hand-pull the bump into a release commit.
+ *
+ * The table is now written truthfully but excluded from the staleness
+ * COMPARISON. These tests pin both halves of that trade: a pure dependency bump
+ * must pass, and every other kind of drift must still fail.
+ *
+ * The script resolves its repo root as `dirname(script)/..`, so a throwaway tree
+ * with the script at <tmp>/scripts/ is a complete, isolated fixture - EXCEPT
+ * that the script now imports @elvatis_com/aahp's shared primitives
+ * (aahp-config.mjs, changelog-grammar.mjs) and shells out to the packaged
+ * aahp-manifest.sh (which sources _aahp-lib.sh) rather than vendored local
+ * copies. Node resolves bare specifiers by walking up from the IMPORTING
+ * FILE's own path looking for node_modules, so <tmp> - outside this repo -
+ * needs its own node_modules/@elvatis_com/aahp stub. It is populated from the
+ * ACTUALLY installed package so the fixture can never silently drift from
+ * what is really pinned in package.json.
+ */
+describe("handoff staleness gate", () => {
+  const repoRoot = path.resolve(__dirname, "..", "..");
+  const aahpPkgRoot = path.dirname(require.resolve("@elvatis_com/aahp/package.json"));
+  let tmp: string;
+
+  /** Run the gate in the fixture tree. Returns true when it passes. */
+  const check = (): boolean => {
+    try {
+      execFileSync(process.execPath, [path.join(tmp, "scripts", "scg-handoff-docs.mjs"), "--check"], {
+        cwd: tmp,
+        stdio: "pipe",
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const refresh = (): void => {
+    execFileSync(process.execPath, [path.join(tmp, "scripts", "scg-handoff-docs.mjs")], {
+      cwd: tmp,
+      stdio: "pipe",
+    });
+  };
+
+  const readDashboard = () => fs.readFileSync(path.join(tmp, ".ai", "handoff", "DASHBOARD.md"), "utf8");
+  const readLog = () => fs.readFileSync(path.join(tmp, ".ai", "handoff", "LOG.md"), "utf8");
+  const readTrust = () => fs.readFileSync(path.join(tmp, ".ai", "handoff", "TRUST.md"), "utf8");
+  const writeDashboard = (s: string) =>
+    fs.writeFileSync(path.join(tmp, ".ai", "handoff", "DASHBOARD.md"), s);
+
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "scg-handoff-"));
+    fs.mkdirSync(path.join(tmp, "scripts"), { recursive: true });
+    fs.mkdirSync(path.join(tmp, "src", "__tests__"), { recursive: true });
+    fs.mkdirSync(path.join(tmp, ".ai", "handoff"), { recursive: true });
+
+    const aahpStub = path.join(tmp, "node_modules", "@elvatis_com", "aahp");
+    fs.mkdirSync(path.join(aahpStub, "scripts"), { recursive: true });
+    fs.copyFileSync(path.join(aahpPkgRoot, "package.json"), path.join(aahpStub, "package.json"));
+    for (const f of ["aahp-config.mjs", "changelog-grammar.mjs", "aahp-manifest.sh", "_aahp-lib.sh"]) {
+      fs.copyFileSync(path.join(aahpPkgRoot, "scripts", f), path.join(aahpStub, "scripts", f));
+    }
+
+    fs.copyFileSync(
+      path.join(repoRoot, "scripts", "scg-handoff-docs.mjs"),
+      path.join(tmp, "scripts", "scg-handoff-docs.mjs"),
+    );
+    fs.writeFileSync(
+      path.join(tmp, "package.json"),
+      JSON.stringify(
+        {
+          name: "fixture",
+          version: "1.0.0",
+          engines: { node: ">=20.0.0" },
+          dependencies: { commander: "^14.0.3" },
+          devDependencies: { typescript: "^7.0.2", vitest: "^4.1.10" },
+        },
+        null,
+        2,
+      ),
+    );
+    fs.writeFileSync(
+      path.join(tmp, "tsconfig.json"),
+      JSON.stringify({ compilerOptions: { types: ["node"] } }, null, 2),
+    );
+    fs.writeFileSync(path.join(tmp, "src", "alpha.ts"), "export const a = 1;\n");
+    fs.writeFileSync(path.join(tmp, "src", "beta.ts"), "export const b = 2;\n");
+    fs.writeFileSync(path.join(tmp, "src", "__tests__", "alpha.test.ts"), "// test\n");
+    fs.writeFileSync(
+      path.join(tmp, "CHANGELOG.md"),
+      "# Changelog\n\n## [Unreleased]\n\n## [1.0.0] - 2026-01-01\n\n### Added\n\n- initial\n",
+    );
+
+    refresh(); // generate a consistent baseline
+  }, 20000); // refresh() spawns bash -> node subprocesses; slow on Windows (measured ~6s/call)
+
+  afterEach(() => {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("passes on a freshly generated tree", () => {
+    expect(check()).toBe(true);
+  });
+
+  it("passes when only a dependency version changed (the dependabot case)", () => {
+    // Exactly what a dependabot PR looks like: package.json moves, the committed
+    // DASHBOARD.md does not, and nothing regenerates it. This used to fail and is
+    // the single reason every dependency PR in this repo arrived red.
+    const pkgPath = path.join(tmp, "package.json");
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+    pkg.devDependencies.typescript = "^7.9.9";
+    fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
+
+    expect(check()).toBe(true);
+  });
+
+  it("still FAILS when a dependency is added or removed", () => {
+    // Deliberate boundary. Only the version COLUMN is ungated, not the row set:
+    // adding or removing a dependency changes what the project depends on, which
+    // is a human decision and belongs in the gated state. Dependabot never does
+    // this - it only moves versions - so the recurring red-PR problem stays fixed
+    // while a genuine change to the dependency set still demands a refresh.
+    const pkgPath = path.join(tmp, "package.json");
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+    pkg.devDependencies["@types/node"] = "^26.1.1";
+    fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
+
+    expect(check()).toBe(false);
+  });
+
+  it("still FAILS when the project version drifts", () => {
+    writeDashboard(readDashboard().replace(/1\.0\.0/g, "9.9.9"));
+    expect(check()).toBe(false);
+  });
+
+  it("still FAILS when the source-module count drifts", () => {
+    fs.writeFileSync(path.join(tmp, "src", "gamma.ts"), "export const g = 3;\n");
+    expect(check()).toBe(false);
+  });
+
+  it("still FAILS when the test-file count drifts", () => {
+    fs.writeFileSync(path.join(tmp, "src", "__tests__", "beta.test.ts"), "// test\n");
+    expect(check()).toBe(false);
+  });
+
+  it("still FAILS when a handoff doc is hand-edited", () => {
+    writeDashboard(readDashboard() + "\nhand-edited line\n");
+    expect(check()).toBe(false);
+  });
+
+  it(
+    "writes the REAL dependency versions, it just does not gate them",
+    () => {
+      // The ungating is comparison-only. The generated doc must stay truthful,
+      // or readers (and agents) would be handed a stale claim about the toolchain.
+      const pkgPath = path.join(tmp, "package.json");
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+      pkg.devDependencies.typescript = "^7.9.9";
+      fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
+
+      refresh();
+      expect(readDashboard()).toContain("| typescript | ^7.9.9 |");
+    },
+    20000, // calls refresh() again on top of beforeEach's; see beforeEach comment
+  );
+
+  it("writes complete time-bound trust records and labels inventory as non-trust", () => {
+    expect(readTrust()).toContain(
+      "| ID | Claim | Status | Provenance | Generated by | Reviewed by | Verified by | Evidence | Last verified | TTL | Expires | Owner | Remaining uncertainty | Next verification step |",
+    );
+    expect(readTrust()).toContain("## Structural inventory (non-trust");
+    expect(readTrust()).toContain("| TR-003 | Linux full-suite result");
+  });
+
+  it("uses release content rather than a changelog subsection as the LOG headline", () => {
+    expect(readLog()).toContain("| v1.0.0 | 2026-01-01 | initial |");
+    expect(readLog()).not.toContain("| v1.0.0 | 2026-01-01 | ### Added |");
+  });
+
+  it(
+    "preserves a numeric next_task_id and the authoritative task graph",
+    () => {
+      const manifestPath = path.join(tmp, ".ai", "handoff", "MANIFEST.json");
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+      manifest.next_task_id = 9;
+      manifest.tasks = {
+        "T-008": {
+          title: "Verify task preservation",
+          status: "ready",
+          priority: "high",
+          depends_on: [],
+          created: "2026-08-04T08:00:00Z",
+        },
+      };
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+
+      refresh();
+
+      const regenerated = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+      expect(regenerated.next_task_id).toBe(9);
+      expect(typeof regenerated.next_task_id).toBe("number");
+      expect(regenerated.tasks).toEqual(manifest.tasks);
+    },
+    20000, // calls refresh() again on top of beforeEach's; see beforeEach comment
+  );
+
+  it(
+    "summarizes content beyond Markdown header chrome",
+    () => {
+      // aahp_auto_summary (in the packaged _aahp-lib.sh) strips title/blockquote/
+      // "---"/blank/HTML-comment lines and PURE table-separator rows
+      // ("|---|---|"), then takes the first surviving line. A table HEADER or
+      // DATA row ("| Field | Value |") is real document content, not chrome, so
+      // it is not stripped - it is the correct summary here, not the later
+      // prose line. (An earlier, narrower AAHP fix tightened the separator-row
+      // regex from stripping every pipe-delimited line to only pure separator
+      // rows, specifically so files that are mostly tables still get a real
+      // summary instead of "(no summary available)".)
+      fs.writeFileSync(
+        path.join(tmp, ".ai", "handoff", "STATUS.md"),
+        [
+          "# Fixture status",
+          "",
+          "> Generated-looking introductory rule.",
+          "> A second quoted line.",
+          "",
+          "---",
+          "",
+          "## Current state",
+          "",
+          "| Field | Value |",
+          "|-------|-------|",
+          "| Status | in progress |",
+          "",
+          "AAHP summary prose is visible after the table.",
+          "",
+        ].join("\n"),
+      );
+
+      refresh();
+
+      const manifest = JSON.parse(
+        fs.readFileSync(path.join(tmp, ".ai", "handoff", "MANIFEST.json"), "utf8"),
+      );
+      expect(manifest.files["STATUS.md"].summary).toBe("| Field | Value |");
+    },
+    20000, // calls refresh() again on top of beforeEach's; see beforeEach comment
+  );
+
+  it("fails closed when a checksum tool exits successfully without a digest", () => {
+    const fakeBin = path.join(tmp, "fake-bin");
+    fs.mkdirSync(fakeBin);
+    const fakeSha = path.join(fakeBin, "sha256sum");
+    fs.writeFileSync(fakeSha, "#!/usr/bin/env bash\nexit 0\n");
+    fs.chmodSync(fakeSha, 0o755);
+
+    expect(() =>
+      execFileSync(
+        process.env.AAHP_BASH || "bash",
+        [
+          "-c",
+          'PATH="$PWD/fake-bin:$PATH"; source node_modules/@elvatis_com/aahp/scripts/_aahp-lib.sh; aahp_checksum package.json',
+        ],
+        { cwd: tmp, stdio: "pipe" },
+      ),
+    ).toThrow();
+  });
+});

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { WatchlistAlert } from "../types.js";
 
 // Create a temp home dir for watchlist isolation (hoisted so vi.mock can use it)
 const { TEST_HOME } = vi.hoisted(() => ({
@@ -13,7 +14,15 @@ vi.mock("node:os", async (importOriginal) => {
   return { ...actual, homedir: () => TEST_HOME };
 });
 
-// Mock node:https before importing the module
+// Mock both transports before importing the module.
+vi.mock("node:http", () => {
+  const mockRequest = vi.fn();
+  return {
+    default: { request: mockRequest },
+    request: mockRequest,
+  };
+});
+
 vi.mock("node:https", () => {
   const mockRequest = vi.fn();
   return {
@@ -22,6 +31,7 @@ vi.mock("node:https", () => {
   };
 });
 
+import * as http from "node:http";
 import * as https from "node:https";
 import {
   checkWallet,
@@ -32,6 +42,8 @@ import {
   removeFromWatchlist,
   listWatchlist,
   formatAlert,
+  sendWebhookAlert,
+  __setSleepForTesting,
   type C2Alert,
 } from "../solana-monitor.js";
 
@@ -63,6 +75,37 @@ function mockRpcResponses(responses: Array<{ result?: unknown; error?: { message
 }
 
 /**
+ * Like mockRpcResponses but lets each entry override HTTP status and headers
+ * (so tests can simulate a 429 or a Retry-After header).
+ */
+function mockRpcResponsesWithStatus(
+  responses: Array<{
+    status?: number;
+    headers?: Record<string, string>;
+    body?: { result?: unknown; error?: { code?: number; message: string } };
+  }>,
+): void {
+  let callIndex = 0;
+  const mockedRequest = https.request as ReturnType<typeof vi.fn>;
+  mockedRequest.mockImplementation((_opts: unknown, cb: (res: unknown) => void) => {
+    const resp = responses[callIndex] ?? responses[responses.length - 1];
+    callIndex++;
+    const body = JSON.stringify(resp.body ?? {});
+
+    cb({
+      statusCode: resp.status ?? 200,
+      headers: resp.headers ?? {},
+      on(event: string, handler: (chunk?: Buffer) => void) {
+        if (event === "data") handler(Buffer.from(body));
+        if (event === "end") handler();
+      },
+    });
+
+    return { on: vi.fn(), write: vi.fn(), end: vi.fn() };
+  });
+}
+
+/**
  * Helper: configure mock to simulate a network error.
  */
 function mockRpcError(errorMessage: string): void {
@@ -81,10 +124,250 @@ function mockRpcError(errorMessage: string): void {
   });
 }
 
+const webhookAlert: WatchlistAlert = {
+  address: "FakeAddr111",
+  name: "Test Wallet",
+  txid: "sig-webhook",
+  memo: "https://evil.example/payload",
+  timestamp: "2026-08-04T12:00:00.000Z",
+};
+
+
+type WebhookResponseMock = {
+  statusCode: number;
+  on: ReturnType<typeof vi.fn>;
+  destroy: ReturnType<typeof vi.fn>;
+  emit: (event: string, ...args: unknown[]) => void;
+};
+
+function createWebhookResponse(statusCode: number): WebhookResponseMock {
+  const handlers = new Map<string, Array<(...args: unknown[]) => void>>();
+  let response: WebhookResponseMock;
+  response = {
+    statusCode,
+    on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+      const listeners = handlers.get(event) ?? [];
+      listeners.push(handler);
+      handlers.set(event, listeners);
+      return response;
+    }),
+    destroy: vi.fn(() => response),
+    emit: (event: string, ...args: unknown[]) => {
+      for (const handler of handlers.get(event) ?? []) handler(...args);
+    },
+  };
+  return response;
+}
+
+function mockWebhookRequest(transport: typeof http | typeof https): {
+  request: {
+    on: ReturnType<typeof vi.fn>;
+    destroy: ReturnType<typeof vi.fn>;
+    write: ReturnType<typeof vi.fn>;
+    end: ReturnType<typeof vi.fn>;
+  };
+  respond: (response: WebhookResponseMock) => void;
+  emitRequestError: (error: Error) => void;
+} {
+  let responseHandler: ((response: WebhookResponseMock) => void) | undefined;
+  let requestErrorHandler: ((error: Error) => void) | undefined;
+  let request: {
+    on: ReturnType<typeof vi.fn>;
+    destroy: ReturnType<typeof vi.fn>;
+    write: ReturnType<typeof vi.fn>;
+    end: ReturnType<typeof vi.fn>;
+  };
+  request = {
+    on: vi.fn((event: string, handler: (error: Error) => void) => {
+      if (event === "error") requestErrorHandler = handler;
+      return request;
+    }),
+    destroy: vi.fn(() => request),
+    write: vi.fn(),
+    end: vi.fn(),
+  };
+  const mockedRequest = transport.request as ReturnType<typeof vi.fn>;
+  mockedRequest.mockImplementation(
+    (_opts: unknown, callback: (response: WebhookResponseMock) => void) => {
+      responseHandler = callback;
+      return request;
+    },
+  );
+  return {
+    request,
+    respond: (incoming) => {
+      if (!responseHandler) throw new Error("Webhook response handler was not registered");
+      responseHandler(incoming);
+    },
+    emitRequestError: (error) => {
+      if (!requestErrorHandler) throw new Error("Webhook error handler was not registered");
+      requestErrorHandler(error);
+    },
+  };
+}
+
+
 describe("Solana Monitor", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Make rate-limit retries instant by stubbing the sleep helper.
+    __setSleepForTesting(() => Promise.resolve());
   });
+
+  afterAll(() => {
+    __setSleepForTesting(null);
+  });
+
+  // ─── Webhook delivery ─────────────────────────────────────
+
+  describe("sendWebhookAlert", () => {
+    it("uses node:https for HTTPS webhooks", async () => {
+      const webhook = mockWebhookRequest(https);
+      const response = createWebhookResponse(204);
+      const delivery = sendWebhookAlert(
+        "https://hooks.example:8443/alerts?source=solana",
+        webhookAlert,
+      );
+
+      webhook.respond(response);
+      await delivery;
+
+      expect(https.request).toHaveBeenCalledWith(
+        expect.objectContaining({
+          hostname: "hooks.example",
+          port: "8443",
+          path: "/alerts?source=solana",
+          method: "POST",
+        }),
+        expect.any(Function),
+      );
+      expect(http.request).not.toHaveBeenCalled();
+      expect(webhook.request.write).toHaveBeenCalledWith(JSON.stringify(webhookAlert));
+      expect(response.destroy).toHaveBeenCalledOnce();
+    });
+
+    it("uses node:http for HTTP webhooks", async () => {
+      const webhook = mockWebhookRequest(http);
+      const response = createWebhookResponse(200);
+      const delivery = sendWebhookAlert("http://localhost/hooks?source=solana", webhookAlert);
+
+      webhook.respond(response);
+      await delivery;
+
+      expect(http.request).toHaveBeenCalledWith(
+        expect.objectContaining({
+          hostname: "localhost",
+          port: 80,
+          path: "/hooks?source=solana",
+          method: "POST",
+        }),
+        expect.any(Function),
+      );
+      expect(https.request).not.toHaveBeenCalled();
+      expect(webhook.request.write).toHaveBeenCalledWith(JSON.stringify(webhookAlert));
+      expect(response.destroy).toHaveBeenCalledOnce();
+    });
+
+    it("rejects unsupported webhook schemes before opening a request", async () => {
+      await expect(sendWebhookAlert("ftp://hooks.example/alerts", webhookAlert)).rejects.toThrow(
+        "Unsupported webhook protocol: ftp:",
+      );
+      expect(http.request).not.toHaveBeenCalled();
+      expect(https.request).not.toHaveBeenCalled();
+    });
+
+    it("rejects non-success status at header time and destroys the response", async () => {
+      const webhook = mockWebhookRequest(https);
+      const response = createWebhookResponse(503);
+      const delivery = sendWebhookAlert("https://hooks.example/alerts", webhookAlert);
+
+      webhook.respond(response);
+
+      await expect(delivery).rejects.toThrow("Webhook request failed with HTTP 503");
+      expect(response.destroy).toHaveBeenCalledOnce();
+    });
+
+    it("settles on headers and destroys a body that could trickle forever", async () => {
+      vi.useFakeTimers();
+      try {
+        const webhook = mockWebhookRequest(http);
+        const response = createWebhookResponse(200);
+        const delivery = sendWebhookAlert("http://localhost/hooks", webhookAlert);
+
+        webhook.respond(response);
+        await expect(delivery).resolves.toBeUndefined();
+
+        response.emit("data", Buffer.from("still trickling"));
+        await vi.advanceTimersByTimeAsync(60_000);
+
+        expect(response.destroy).toHaveBeenCalledOnce();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("ignores aborted and error events after a truncated successful response", async () => {
+      const webhook = mockWebhookRequest(http);
+      const response = createWebhookResponse(200);
+      const delivery = sendWebhookAlert("http://localhost/hooks", webhookAlert);
+
+      webhook.respond(response);
+      response.emit("aborted");
+      response.emit("error", new Error("response truncated"));
+
+      await expect(delivery).resolves.toBeUndefined();
+      expect(response.destroy).toHaveBeenCalledOnce();
+    });
+
+    it("enforces an absolute deadline before any response arrives", async () => {
+      vi.useFakeTimers();
+      try {
+        const webhook = mockWebhookRequest(http);
+        const delivery = sendWebhookAlert("http://localhost/hooks", webhookAlert);
+        const rejected = expect(delivery).rejects.toThrow(
+          "Webhook request timed out after 10000ms",
+        );
+
+        await vi.advanceTimersByTimeAsync(10_000);
+
+        await rejected;
+        expect(webhook.request.destroy).toHaveBeenCalledOnce();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("settles only once when errors and a response arrive after timeout", async () => {
+      vi.useFakeTimers();
+      try {
+        const webhook = mockWebhookRequest(http);
+        const delivery = sendWebhookAlert("http://localhost/hooks", webhookAlert);
+        const outcome = delivery.then(
+          () => "resolved",
+          (error: unknown) => error instanceof Error ? error.message : String(error),
+        );
+
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(await outcome).toBe("Webhook request timed out after 10000ms");
+
+        webhook.emitRequestError(new Error("late request error"));
+        const lateResponse = createWebhookResponse(200);
+        webhook.respond(lateResponse);
+        lateResponse.emit("aborted");
+        lateResponse.emit("error", new Error("late response error"));
+        await Promise.resolve();
+
+        expect(webhook.request.destroy).toHaveBeenCalledOnce();
+        expect(lateResponse.destroy).toHaveBeenCalledOnce();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
 
   // ─── checkWallet ──────────────────────────────────────────
 
@@ -237,13 +520,87 @@ describe("Solana Monitor", () => {
     });
 
     it("should handle RPC errors gracefully", async () => {
-      mockRpcResponses([{ error: { message: "Rate limited" } }]);
-      await expect(checkWallet("FakeAddr111", 5)).rejects.toThrow("Solana RPC error: Rate limited");
+      mockRpcResponses([{ error: { message: "Invalid params" } }]);
+      await expect(checkWallet("FakeAddr111", 5)).rejects.toThrow("Solana RPC error: Invalid params");
     });
 
     it("should handle network errors", async () => {
       mockRpcError("ECONNREFUSED");
       await expect(checkWallet("FakeAddr111", 5)).rejects.toThrow("ECONNREFUSED");
+    });
+  });
+
+  // ─── Rate-limit handling (T-007) ──────────────────────────
+
+  describe("Rate-limit handling", () => {
+    it("should retry on HTTP 429 and succeed on the second attempt", async () => {
+      mockRpcResponsesWithStatus([
+        { status: 429, body: {} },
+        { status: 200, body: { result: [] } },
+      ]);
+
+      const results = await checkWallet("FakeAddr111", 5);
+      expect(results).toEqual([]);
+      expect(https.request).toHaveBeenCalledTimes(2);
+    });
+
+    it("should retry on JSON-RPC -32005 and succeed", async () => {
+      mockRpcResponsesWithStatus([
+        { status: 200, body: { error: { code: -32005, message: "Node is behind by 1234 slots" } } },
+        { status: 200, body: { result: [] } },
+      ]);
+
+      const results = await checkWallet("FakeAddr111", 5);
+      expect(results).toEqual([]);
+      expect(https.request).toHaveBeenCalledTimes(2);
+    });
+
+    it("should honor the Retry-After header when present", async () => {
+      const sleepCalls: number[] = [];
+      __setSleepForTesting(async (ms) => {
+        sleepCalls.push(ms);
+      });
+
+      mockRpcResponsesWithStatus([
+        { status: 429, headers: { "retry-after": "2" }, body: {} },
+        { status: 200, body: { result: [] } },
+      ]);
+
+      await checkWallet("FakeAddr111", 5);
+      // Retry-After: 2 -> 2000 ms (must override exponential backoff)
+      expect(sleepCalls).toEqual([2000]);
+    });
+
+    it("should give up after the maximum number of retries", async () => {
+      // 6 = 1 initial attempt + 5 retries; mock returns 429 forever.
+      mockRpcResponsesWithStatus([
+        { status: 429, body: {} },
+      ]);
+
+      await expect(checkWallet("FakeAddr111", 5)).rejects.toThrow(
+        /HTTP 429|rate limited/i,
+      );
+      expect(https.request).toHaveBeenCalledTimes(6);
+    });
+
+    it("should not retry on non-rate-limit errors", async () => {
+      mockRpcResponsesWithStatus([
+        { status: 200, body: { error: { code: -32602, message: "Invalid params" } } },
+      ]);
+
+      await expect(checkWallet("FakeAddr111", 5)).rejects.toThrow("Invalid params");
+      expect(https.request).toHaveBeenCalledTimes(1);
+    });
+
+    it("should treat 'too many requests' error messages as rate-limited", async () => {
+      mockRpcResponsesWithStatus([
+        { status: 200, body: { error: { message: "Too Many Requests" } } },
+        { status: 200, body: { result: [] } },
+      ]);
+
+      const results = await checkWallet("FakeAddr111", 5);
+      expect(results).toEqual([]);
+      expect(https.request).toHaveBeenCalledTimes(2);
     });
   });
 

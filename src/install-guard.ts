@@ -1,0 +1,628 @@
+/**
+ * Install-time guard (v5.5, roadmap Bet 2).
+ *
+ * Blocks known-bad packages BEFORE the package manager runs their lifecycle
+ * scripts: `supply-chain-guard guard npm install <pkg>` checks every package
+ * spec on the command line against the OFFLINE IOC sources (bundled threat
+ * feed + refreshed .scg-cache feed + known-bad-version blocklist + typosquat
+ * heuristics) and only invokes the real package manager when nothing matches.
+ *
+ * Everything is auditable in git history, works offline, needs no account.
+ * No network calls are made by this module.
+ */
+
+import { spawnSync } from "node:child_process";
+import { loadThreatIntel, matchPackageIOC, type FeedIOC } from "./threat-intel.js";
+import { checkBadVersion } from "./ioc-blocklist.js";
+import { analyzeDependencyRisks, resolveNpmAlias } from "./dependency-risk-analyzer.js";
+import type { Finding } from "./types.js";
+
+// Re-exported so the scanner can resolve alias specs without importing the
+// analyzer directly (it already depends on this module).
+export { resolveNpmAlias };
+
+// ---------------------------------------------------------------------------
+// Managers and install verbs
+// ---------------------------------------------------------------------------
+
+export const SUPPORTED_MANAGERS = ["npm", "pnpm", "yarn", "bun"] as const;
+export type PackageManager = (typeof SUPPORTED_MANAGERS)[number];
+
+/**
+ * Verbs that add NEW package specs from the command line. Verbs missing here
+ * (npm ci, yarn install, run, test, ...) either install nothing new or take
+ * their inputs from manifest/lockfile - those are covered by `scan`, not by
+ * the install guard, and pass through unchanged.
+ */
+const INSTALL_VERBS: Record<PackageManager, ReadonlySet<string>> = {
+  // npm accepts a long list of documented aliases/typo-forms for `install`
+  // (npm-install(1)): a guard that silently no-ops on `npm isntall evil` gives
+  // false assurance. v5.6.0 gate finding M2.
+  npm: new Set([
+    "install", "add", "i", "in", "ins", "inst", "insta", "instal",
+    "isnt", "isnta", "isntal", "isntall",
+  ]),
+  pnpm: new Set(["add", "install", "i"]),
+  yarn: new Set(["add"]),
+  bun: new Set(["add", "install", "i", "a"]),
+};
+
+// npm exec may download a missing package and immediately execute it. It is
+// package-bearing even though npm does not call it an install command.
+const NPM_EXEC_VERBS: ReadonlySet<string> = new Set(["exec", "x"]);
+
+// Flags that consume the NEXT token as their value. Their value must not be
+// mistaken for the install verb or a package spec (v5.6.0 gate finding M3 and
+// its low-severity sibling: `npm --prefix ./x install evil` and
+// `npm install --prefix x lodash`).
+const VALUE_FLAGS = new Set([
+  "--prefix", "-C", "--dir", "--cwd", "--registry", "--tag", "--workspace",
+  "-w", "--store-dir", "--cache", "--config", "--userconfig", "--globalconfig",
+  "--loglevel", "--network-timeout", "--filter", "--reporter", "--save-exact",
+]);
+
+function isPackageManager(manager: string): manager is PackageManager {
+  return (SUPPORTED_MANAGERS as readonly string[]).includes(manager);
+}
+
+/**
+ * The four managers are shipped as .cmd shims on Windows; spawn needs the
+ * shim name there. The platform parameter exists for tests only.
+ */
+export function resolveManagerBinary(
+  manager: PackageManager,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  return platform === "win32" ? `${manager}.cmd` : manager;
+}
+
+// ---------------------------------------------------------------------------
+// Spec extraction
+// ---------------------------------------------------------------------------
+
+export interface InstallPackageSpec {
+  /** Token exactly as given on the command line */
+  raw: string;
+  /** Package name ("lodash", "@scope/name") */
+  name: string;
+  /** Version/range/tag after the last "@", if present ("1.2.3", "^1.0.0", "latest") */
+  version?: string;
+}
+
+/**
+ * Registry package name shape (optionally scoped). Anything else on the
+ * command line - paths, tarballs, git/URL/alias specs - cannot be resolved
+ * against the offline blocklist and is left for the full `scan` to judge.
+ */
+const REGISTRY_NAME_RE = /^(@[a-z0-9][a-z0-9-._~]*\/)?[a-z0-9-._~][a-z0-9-._~]*$/i;
+
+/**
+ * Parse one command-line token into a package spec. Returns null for flags
+ * and for tokens that are not plain registry specs.
+ */
+export function parseSpecToken(token: string): InstallPackageSpec | null {
+  if (token.length === 0 || token.startsWith("-")) return null;
+
+  // Alias form FIRST: "utils@npm:chalk-tempalte@1.0.0". This must be detected
+  // before the version split, because lastIndexOf("@") would land on the alias
+  // target's own version and leave an unparseable name. Previously that made the
+  // whole spec fail REGISTRY_NAME_RE and get dropped, so `npm install
+  // x@npm:<malware>` was never checked at all - a complete bypass of the guard.
+  // The installed package is the alias TARGET, so resolve and check that.
+  const aliasAt = token.indexOf("@npm:");
+  if (aliasAt > 0) {
+    const label = token.substring(0, aliasAt);
+    if (!REGISTRY_NAME_RE.test(label)) return null;
+    const alias = resolveNpmAlias(token.substring(aliasAt + 1));
+    if (!alias) return null;
+    return alias.version === undefined
+      ? { raw: token, name: alias.name }
+      : { raw: token, name: alias.name, version: alias.version };
+  }
+
+  // Split "name@version" / "@scope/name@version" at the LAST "@";
+  // index 0 is the scope marker, not a version separator.
+  const at = token.lastIndexOf("@");
+  const name = at > 0 ? token.substring(0, at) : token;
+  const version = at > 0 ? token.substring(at + 1) : undefined;
+
+  if (!REGISTRY_NAME_RE.test(name)) return null;
+  // Other protocol versions ("foo@git:...") are not plain registry pins; skip
+  // rather than mis-attribute a version.
+  if (version !== undefined && (version.length === 0 || version.includes(":"))) return null;
+
+  return version === undefined ? { raw: token, name } : { raw: token, name, version };
+}
+
+/**
+ * Extract package specs from manager args, including npm exec packages that
+ * may be downloaded immediately before execution.
+ *
+ * The install verb is the first bare token that IS a known install verb,
+ * found by scanning positionally while skipping flags, flag values, and the
+ * `global` positional modifier. This defeats two confirmed bypasses (v5.6.0
+ * gate M3): a value-taking global flag shifting the apparent verb
+ * (`npm --prefix ./x install evil`) and Yarn's `global add` form
+ * (`yarn global add evil`). If no install verb is present the command
+ * installs nothing new and passes through unscanned.
+ */
+export function extractInstallSpecs(
+  manager: PackageManager,
+  args: string[],
+): { verb?: string; installVerb: boolean; specs: InstallPackageSpec[] } {
+  const verbs = INSTALL_VERBS[manager];
+  let verbIdx = -1;
+  let verb: string | undefined;
+  let npmExec = false;
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a.length === 0) continue;
+    if (a.startsWith("-")) {
+      // `--flag value` form: skip the value so it is never read as the verb.
+      if (VALUE_FLAGS.has(a) && i + 1 < args.length) i++;
+      continue;
+    }
+    if (verb === undefined) verb = a; // first bare token, for reporting
+    if (verbs.has(a)) { verbIdx = i; verb = a; break; }
+    if (manager === "npm" && NPM_EXEC_VERBS.has(a)) {
+      verbIdx = i;
+      verb = a;
+      npmExec = true;
+      break;
+    }
+    // `global` is a positional modifier (npm/yarn `global add`), not the verb.
+    if (a === "global") continue;
+    // A different bare token before any package-bearing verb (run, ci, a script
+    // name, ...): not an install command, stop.
+    break;
+  }
+
+  if (verbIdx === -1) return { verb, installVerb: false, specs: [] };
+
+  const specs: InstallPackageSpec[] = [];
+  const rest = args.slice(verbIdx + 1);
+  if (npmExec) {
+    // The first positional is the executable package; later positionals are
+    // arguments for that executable and must not be misreported as packages.
+    for (let i = 0; i < rest.length; i++) {
+      const token = rest[i];
+      if (token === "--") {
+        // After an explicit --package, everything beyond `--` is the command
+        // and its arguments. With no explicit package, `--` introduces the
+        // positional package form (`npm exec -- pkg`).
+        if (specs.length > 0) break;
+        continue;
+      }
+      if (token === "--package" || token === "-p") {
+        const spec = i + 1 < rest.length ? parseSpecToken(rest[++i]!) : null;
+        if (spec) specs.push(spec);
+        continue;
+      }
+      if (token.startsWith("--package=")) {
+        const spec = parseSpecToken(token.substring("--package=".length));
+        if (spec) specs.push(spec);
+        continue;
+      }
+      if (token.startsWith("-")) continue;
+      const spec = parseSpecToken(token);
+      if (spec) specs.push(spec);
+      break;
+    }
+    return { verb, installVerb: true, specs };
+  }
+
+  for (let i = 0; i < rest.length; i++) {
+    const token = rest[i];
+    if (token.startsWith("-")) {
+      if (VALUE_FLAGS.has(token) && i + 1 < rest.length) i++; // skip flag value
+      continue;
+    }
+    const spec = parseSpecToken(token);
+    if (spec) specs.push(spec);
+  }
+  return { verb, installVerb: true, specs };
+}
+
+// ---------------------------------------------------------------------------
+// Offline analysis
+// ---------------------------------------------------------------------------
+
+/**
+ * Rules that are REPORTED but never block an install.
+ *
+ * A deny-list, not an allow-list, on purpose: a new exact-match rule added to
+ * checkSpec keeps blocking authority automatically, and only a rule someone
+ * deliberately lists here loses it. Given that a false negative silently lowers
+ * the bar everywhere this runs, the safe default has to be "blocks".
+ *
+ * Only DEP_INTERNAL_NAME_PUBLIC is demoted. It fires on the NAME SHAPE of a
+ * scoped package (any @scope/*-utils, -api, -core, -service, -shared, -common,
+ * -lib), which matched 1.7% of all real scoped packages in a registry sweep -
+ * including @babel/helper-plugin-utils, @vue/compiler-core and
+ * @tanstack/query-core - and blocked every one of them at critical.
+ *
+ * TYPOSQUAT_LEVENSHTEIN is deliberately NOT demoted, even though it is also a
+ * heuristic. checkSpec never consults src/patterns.ts, so for curated squats
+ * whose target is popular (lodahs, crossenv, cros-env, 1odash, l0dash, expresss,
+ * nodemai1er, reqeust, axois, raect) this rule is the guard's ONLY view of them:
+ * demoting it was measured to lose 10 real blocks. Wiring the curated names into
+ * checkSpec is the prerequisite for ever revisiting that.
+ */
+const WARN_ONLY_RULES: ReadonlySet<string> = new Set(["DEP_INTERNAL_NAME_PUBLIC"]);
+
+export interface InstallGuardVerdict {
+  spec: InstallPackageSpec;
+  /** Every finding, blocking or not. Nothing is dropped. */
+  findings: Finding[];
+  /** Findings that carry blocking authority */
+  blocking: Finding[];
+  /** Heuristic findings that are reported but do not block */
+  warnings: Finding[];
+}
+
+export interface InstallCommandAnalysis {
+  manager: PackageManager;
+  /** First non-flag manager arg (undefined when args are all flags/empty) */
+  verb?: string;
+  /** True when the verb can acquire a package named on the command line */
+  installVerb: boolean;
+  specs: InstallPackageSpec[];
+  /** One verdict per spec; findings empty = clean */
+  verdicts: InstallGuardVerdict[];
+  /** True when at least one spec has a BLOCKING finding */
+  blocked: boolean;
+  /** True when at least one spec has a warn-only finding */
+  warned: boolean;
+}
+
+/**
+ * npm package IOCs in the feed carry no ecosystem prefix (only ruby:/composer:/
+ * nuget:/go:/jenkins: entries do - see matchPackageIOC). Same companion
+ * matcher as mcp-server.ts matchBarePackageIOC.
+ */
+export function matchBareNpmIOC(
+  name: string,
+  version: string | undefined,
+  feed: readonly FeedIOC[],
+): FeedIOC | null {
+  // Candidates are held in original feed order, so "first match wins" is
+  // preserved exactly, identical to the linear reference below.
+  const candidates = getBareNpmIndex(feed).get(name);
+  if (!candidates) return null;
+
+  for (const { ioc, version: iocVersion } of candidates) {
+    if (iocVersion === undefined) return ioc; // bare-name IOC: any version
+    if (version !== undefined && iocVersion === version) return ioc;
+  }
+  return null;
+}
+
+/**
+ * Reference implementation, kept so the index has something to be proved
+ * against. install-guard.test.ts asserts the two agree across the WHOLE bundled
+ * feed; without that, an index bug becomes a silent false negative in the most
+ * security-critical matcher in the project. Same arrangement as
+ * matchPackageIOCLinear in threat-intel.ts.
+ */
+export function matchBareNpmIOCLinear(
+  name: string,
+  version: string | undefined,
+  feed: readonly FeedIOC[],
+): FeedIOC | null {
+  for (const ioc of feed) {
+    if (ioc.type !== "package") continue;
+    // Skip ecosystem-prefixed entries; npm names never contain ":".
+    if (ioc.value.includes(":")) continue;
+
+    const at = ioc.value.lastIndexOf("@");
+    const iocName = at > 0 ? ioc.value.substring(0, at) : ioc.value;
+    const iocVersion = at > 0 ? ioc.value.substring(at + 1) : undefined;
+
+    if (iocName !== name) continue;
+    if (iocVersion === undefined) return ioc; // bare-name IOC: any version
+    if (version !== undefined && iocVersion === version) return ioc;
+  }
+  return null;
+}
+
+/** One indexed candidate: the entry plus its parsed version (undefined = bare). */
+interface IndexedBareNpmIOC {
+  ioc: FeedIOC;
+  version: string | undefined;
+}
+
+/**
+ * Lazily-built lookup index over a feed array, keyed by bare npm package name.
+ *
+ * Keyed on the feed array identity via a WeakMap, so a caller-supplied feed and
+ * the memoized shared feed each get their own index and neither leaks. Mirrors
+ * packageIndexCache in threat-intel.ts.
+ *
+ * Why this exists (T-017): the linear scan cost one full pass over the feed PER
+ * CALL, so a scan of N dependencies cost N x feed. The feed grows by 100-200
+ * entries per daily sweep, and collection-reachability.test.ts, which calls the
+ * real matcher once per entry, is quadratic in feed size - it went red on CI
+ * during the v5.25.6 release and was carrying a 30s timeout as a stopgap.
+ */
+const bareNpmIndexCache = new WeakMap<
+  readonly FeedIOC[],
+  Map<string, IndexedBareNpmIOC[]>
+>();
+
+/**
+ * How many times getBareNpmIndex has BUILT an index (a cache miss) since this
+ * module was loaded. Never reset; read the delta across the window you care
+ * about.
+ *
+ * This is production code and not a test hook by accident: "the index is built
+ * at most once per process for a given feed array" is the invariant the WeakMap
+ * above exists to provide, and it is invisible from the outside - a caller that
+ * defeats it gets correct results, just slowly, which is how issue 177 survived
+ * a passing test suite. Counting the misses is the only way to assert it.
+ * Cost is one integer increment on the miss path.
+ * https://github.com/homeofe/supply-chain-guard/issues/177
+ */
+let bareNpmIndexBuilds = 0;
+
+/** Cache misses in getBareNpmIndex since module load. See bareNpmIndexBuilds. */
+export function getBareNpmIndexBuildCount(): number {
+  return bareNpmIndexBuilds;
+}
+
+function getBareNpmIndex(feed: readonly FeedIOC[]): Map<string, IndexedBareNpmIOC[]> {
+  const cached = bareNpmIndexCache.get(feed);
+  if (cached) return cached;
+
+  bareNpmIndexBuilds++;
+  const index = new Map<string, IndexedBareNpmIOC[]>();
+  for (const ioc of feed) {
+    if (ioc.type !== "package") continue;
+    if (ioc.value.includes(":")) continue;
+
+    const at = ioc.value.lastIndexOf("@");
+    const iocName = at > 0 ? ioc.value.substring(0, at) : ioc.value;
+    const iocVersion = at > 0 ? ioc.value.substring(at + 1) : undefined;
+
+    const bucket = index.get(iocName);
+    if (bucket) bucket.push({ ioc, version: iocVersion });
+    else index.set(iocName, [{ ioc, version: iocVersion }]);
+  }
+
+  bareNpmIndexCache.set(feed, index);
+  return index;
+}
+
+function checkSpec(spec: InstallPackageSpec, feed: FeedIOC[]): Finding[] {
+  const findings: Finding[] = [];
+
+  // 1. Threat-intel package IOCs (bundled + refreshed .scg-cache feed).
+  // The prefixed lookup matches nothing in the BUNDLED feed by construction
+  // (npm entries carry no prefix), but it is kept deliberately: a remote or
+  // third-party feed may legitimately publish "npm:"-prefixed entries, and
+  // since matchPackageIOC became an indexed O(1) lookup this costs nothing.
+  const ioc =
+    matchPackageIOC("npm", spec.name, spec.version, feed) ??
+    matchBareNpmIOC(spec.name, spec.version, feed);
+  if (ioc) {
+    findings.push({
+      rule: "THREAT_INTEL_PACKAGE_IOC",
+      description: `Package IOC match: ${ioc.value}${ioc.family ? ` (${ioc.family})` : ""}${ioc.campaign ? ` - ${ioc.campaign}` : ""}`,
+      severity: ioc.severity,
+      file: spec.raw,
+      confidence: ioc.confidence,
+      category: "malware",
+      recommendation: `Do not install ${spec.raw}. This package is listed in the threat-intel feed${ioc.campaign ? ` (campaign: ${ioc.campaign})` : ""}.`,
+    });
+  }
+
+  // 2. Known-bad version blocklist (needs an exact version pin to match).
+  if (spec.version !== undefined) {
+    const bad = checkBadVersion(spec.name, spec.version, "npm");
+    if (bad) findings.push({ ...bad, file: spec.raw });
+  }
+
+  // 3. Typosquat / internal-name heuristics, reused from the dependency risk
+  //    analyzer (Levenshtein distance against popular packages).
+  findings.push(
+    ...analyzeDependencyRisks({ [spec.name]: spec.version ?? "*" }, spec.raw),
+  );
+
+  return findings;
+}
+
+/**
+ * Pure analysis of an install command: no spawn, no network, no filesystem
+ * writes (loadThreatIntel reads the local feed cache when no feed is given).
+ */
+export function analyzeInstallCommand(
+  manager: string,
+  args: string[],
+  feed?: FeedIOC[],
+): InstallCommandAnalysis {
+  if (!isPackageManager(manager)) {
+    throw new Error(
+      `Unsupported package manager "${manager}". Allowed: ${SUPPORTED_MANAGERS.join(", ")}. ` +
+        "The install guard never executes arbitrary commands.",
+    );
+  }
+
+  const { verb, installVerb, specs } = extractInstallSpecs(manager, args);
+  if (!installVerb || specs.length === 0) {
+    return { manager, verb, installVerb, specs, verdicts: [], blocked: false, warned: false };
+  }
+
+  const entries = feed ?? loadThreatIntel();
+  const verdicts = specs.map((spec) => {
+    const findings = checkSpec(spec, entries);
+    return {
+      spec,
+      findings,
+      blocking: findings.filter((f) => !WARN_ONLY_RULES.has(f.rule)),
+      warnings: findings.filter((f) => WARN_ONLY_RULES.has(f.rule)),
+    };
+  });
+  const blocked = verdicts.some((v) => v.blocking.length > 0);
+  const warned = verdicts.some((v) => v.warnings.length > 0);
+
+  return { manager, verb, installVerb, specs, verdicts, blocked, warned };
+}
+
+// ---------------------------------------------------------------------------
+// Guarded execution
+// ---------------------------------------------------------------------------
+
+/** Injectable spawn signature - tests replace this so nothing is executed. */
+export type SpawnLike = (
+  command: string,
+  args: string[],
+  options: { stdio: "inherit"; shell: false },
+) => { status: number | null; error?: Error };
+
+// cmd.exe metacharacters that must be ^-escaped (cross-spawn's meta set).
+const CMD_META_RE = /([()\][%!^"`<>&|;, *?])/g;
+
+/**
+ * ^-escape a bare command name for cmd.exe (never quoted). The .cmd/.bat shim
+ * re-expands the whole line through cmd once more via `%*`, so metacharacters
+ * must be ^-escaped TWICE (doubleEscapeMetaChars in cross-spawn). Single
+ * escaping is a command-injection hole: v5.6.0 gate finding M1 proved
+ * `x"&echo INJECTED&"` broke out during the %* re-parse with one escape and
+ * did not with two.
+ */
+export function escapeCmdShellCommand(command: string): string {
+  // Two passes, not "^^$1": the second pass must also escape the `^` chars the
+  // first pass introduced (cross-spawn doubleEscapeMetaChars semantics).
+  return command.replace(CMD_META_RE, "^$1").replace(CMD_META_RE, "^$1");
+}
+
+/**
+ * Quote + double-^-escape one argument for cmd.exe (cross-spawn technique for
+ * .cmd/.bat targets): backslash-double the sequences before quotes, wrap in
+ * double quotes, then ^-escape every cmd metacharacter twice because the shim
+ * re-parses the line. See escapeCmdShellCommand for why two passes.
+ */
+export function escapeCmdShellArg(arg: string): string {
+  let escaped = arg.replace(/(\\*)"/g, '$1$1\\"');
+  escaped = escaped.replace(/(\\*)$/, "$1$1");
+  return `"${escaped}"`.replace(CMD_META_RE, "^$1").replace(CMD_META_RE, "^$1");
+}
+
+/**
+ * Node >=20.12 (CVE-2024-27980 hardening) refuses to spawn .cmd/.bat files
+ * with shell:false (EINVAL), and npm/pnpm/yarn ship as .cmd shims on Windows.
+ * The default spawn therefore routes .cmd shims through `cmd.exe /d /s /c`
+ * with windowsVerbatimArguments and full metacharacter escaping (the
+ * cross-spawn technique) - every argument is individually quoted and
+ * ^-escaped, never naively concatenated, and the command name itself comes
+ * from the fixed four-manager allowlist. Everywhere else the manager is
+ * spawned directly without any shell.
+ */
+const defaultSpawn: SpawnLike = (command, args, options) => {
+  if (process.platform === "win32" && command.toLowerCase().endsWith(".cmd")) {
+    const commandLine = [escapeCmdShellCommand(command), ...args.map(escapeCmdShellArg)].join(" ");
+    const result = spawnSync(
+      process.env.comspec ?? "cmd.exe",
+      ["/d", "/s", "/c", `"${commandLine}"`],
+      { stdio: options.stdio, windowsVerbatimArguments: true },
+    );
+    return { status: result.status, error: result.error };
+  }
+  const result = spawnSync(command, args, options);
+  return { status: result.status, error: result.error };
+};
+
+export interface InstallGuardOptions {
+  /** Proceed despite findings (loud warning). */
+  force?: boolean;
+  /** Check only; never invoke the package manager. */
+  dryRun?: boolean;
+  /** Injected feed (tests); defaults to loadThreatIntel(). */
+  feed?: FeedIOC[];
+  /** Injected spawn (tests); defaults to node:child_process spawnSync. */
+  spawn?: SpawnLike;
+  /** Injected output sink; defaults to console.log. */
+  log?: (line: string) => void;
+}
+
+function printVerdicts(
+  analysis: InstallCommandAnalysis,
+  log: (line: string) => void,
+  kind: "blocking" | "warnings" = "blocking",
+): void {
+  const hits = analysis.verdicts.filter((v) => v[kind].length > 0);
+  if (hits.length === 0) return;
+  const total = hits.reduce((n, v) => n + v[kind].length, 0);
+  const label =
+    kind === "blocking"
+      ? `${total} finding(s)`
+      : `${total} warning(s) (reported, not blocking)`;
+  log("");
+  log(`  Install guard: ${label} in "${analysis.manager} ${analysis.verb}" command:`);
+  for (const verdict of hits) {
+    log("");
+    log(`  Package: ${verdict.spec.raw}`);
+    for (const finding of verdict[kind]) {
+      log(`    [${finding.severity.toUpperCase()}] ${finding.rule}: ${finding.description}`);
+      log(`    ${finding.recommendation}`);
+    }
+  }
+  log("");
+}
+
+/**
+ * Analyze the command, print findings, and (unless blocked or --dry-run)
+ * invoke the package manager with the args untouched. Returns the process
+ * exit code: manager's own code on pass-through, 2 when blocked, 0 for a
+ * clean --dry-run.
+ *
+ * Execution is spawn-without-shell on every platform; the manager name is
+ * restricted to the four known binaries, so no shell string is ever built
+ * from user input.
+ */
+export function runInstallGuard(
+  manager: string,
+  managerArgs: string[],
+  options: InstallGuardOptions = {},
+): number {
+  const spawnFn = options.spawn ?? defaultSpawn;
+  const log = options.log ?? ((line: string) => console.log(line));
+
+  const analysis = analyzeInstallCommand(manager, managerArgs, options.feed);
+
+  if (analysis.blocked) {
+    printVerdicts(analysis, log, "blocking");
+    // Warn-only findings on a blocked command are still worth showing.
+    printVerdicts(analysis, log, "warnings");
+    if (options.dryRun) {
+      log("  Dry run: package manager not invoked.");
+      return 2;
+    }
+    if (!options.force) {
+      log(`  BLOCKED: ${analysis.manager} was not invoked. Re-run with --force to override (not recommended).`);
+      return 2;
+    }
+    log("  WARNING: --force is set - proceeding DESPITE the findings above. The packages listed are known-bad or suspicious.");
+  } else if (analysis.warned) {
+    // Heuristic-only findings: report in full, then let the install proceed.
+    // These used to exit 2, which made a name-shape guess as authoritative as a
+    // threat-feed malware match.
+    printVerdicts(analysis, log, "warnings");
+    if (options.dryRun) {
+      log("  Dry run: nothing known-bad, warnings above are advisory only.");
+      return 0;
+    }
+  } else if (options.dryRun) {
+    log(
+      `  Install guard: no known-bad packages in "${[analysis.manager, ...managerArgs].join(" ")}" (dry run, nothing executed).`,
+    );
+    return 0;
+  }
+
+  const binary = resolveManagerBinary(analysis.manager);
+  const result = spawnFn(binary, managerArgs, { stdio: "inherit", shell: false });
+  if (result.error) {
+    throw new Error(`Failed to run ${binary}: ${result.error.message}`);
+  }
+  return result.status ?? 1;
+}

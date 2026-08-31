@@ -6,7 +6,8 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { execSync } from "node:child_process";
+import * as os from "node:os";
+import { execSync, execFileSync } from "node:child_process";
 import type { Finding, ScanOptions, ScanReport, ScanSummary, Severity } from "./types.js";
 import { SEVERITY_SCORES } from "./types.js";
 import {
@@ -14,8 +15,10 @@ import {
   CAMPAIGN_PATTERNS,
   SUSPICIOUS_FILES,
   SUSPICIOUS_SCRIPTS,
+  AUTO_RUN_LIFECYCLE_HOOKS,
   SCANNABLE_EXTENSIONS,
   MAX_FILE_SIZE,
+  makeOversizedSkipFinding,
   BINARY_EXTENSIONS,
   BINARY_DOWNLOAD_PATTERNS,
   KNOWN_NATIVE_PACKAGES,
@@ -26,20 +29,53 @@ import {
   CAMPAIGN_PATTERNS_V2,
   OBFUSCATION_PATTERNS_V2,
   IAC_PATTERNS,
+  truncateMatch,
 } from "./patterns.js";
+import {
+  maskMixedCommentsPreservingStrings,
+} from "./correlated-pattern-matchers.js";
+import { matchBareNpmIOC, resolveNpmAlias } from "./install-guard.js";
+import { TEST_FILE_PATTERN } from "./pattern-applicability.js";
+import {
+  hasPartialScanFinding,
+  matchPatternInFile,
+  matchPatternInSemanticText,
+  normalizePublicCoveragePath,
+  recordUnreadablePath,
+} from "./pattern-scanner.js";
+import type { FeedIOC } from "./threat-intel.js";
 import { checkLockfile } from "./lockfile-checker.js";
+import { isJsonObject, parseJsonObject } from "./json-utils.js";
+import {
+  collectExtractedFiles,
+  DEFAULT_EXTRACTED_WALK_MAX_ENTRIES,
+} from "./extracted-file-walker.js";
 import { scanGitHubActionsWorkflows } from "./github-actions-scanner.js";
-import { scanDockerFiles, isDockerFile, scanDockerFile } from "./dockerfile-scanner.js";
-import { scanConfigFiles, isConfigFile, scanConfigFile } from "./config-scanner.js";
+import { scanAgenticWorkflows } from "./agentic-workflow-scanner.js";
+import { isDockerFile, scanDockerFile } from "./dockerfile-scanner.js";
+import { isConfigFile, scanConfigFile } from "./config-scanner.js";
+import {
+  loadInternalDisclosureConfig,
+  scanInternalDisclosure,
+} from "./internal-disclosure.js";
 import { scanGitSecurity } from "./git-scanner.js";
 import { analyzeEntropy } from "./entropy.js";
 import { scanCargoFiles, isCargoFile } from "./cargo-scanner.js";
 import { scanGoFiles } from "./go-scanner.js";
-import { checkIOCBlocklist, checkBadVersion } from "./ioc-blocklist.js";
+import { scanRubyGemsFiles } from "./rubygems-scanner.js";
+import { scanComposerFiles } from "./composer-scanner.js";
+import { scanNuGetFiles, hasNuGetFiles } from "./nuget-scanner.js";
+import {
+  isPythonLockfile,
+  scanPythonLockfileContent,
+  scanPythonLockfiles,
+} from "./python-lockfile-scanner.js";
+import { checkIOCBlocklist, checkBadVersion, checkFileDigest } from "./ioc-blocklist.js";
 import { analyzeGitHubTrust, parseGitHubUrl, scanReadmeLures } from "./github-trust-scanner.js";
 import {
   INFOSTEALER_PATTERNS,
   LURE_PATTERNS,
+  PROMPT_INJECTION_PATTERNS,
   C2_EXTENDED_PATTERNS,
   SECRETS_PATTERNS,
 } from "./patterns.js";
@@ -47,9 +83,9 @@ import { analyzeInstallHooks, extractInstallScripts } from "./install-hook-scann
 import { analyzeDependencyRisks } from "./dependency-risk-analyzer.js";
 import { correlateFindings } from "./correlation-engine.js";
 import { calculateTrustBreakdown } from "./trust-breakdown.js";
-import { loadPolicyConfig, applyPolicy, applyBaseline } from "./policy-engine.js";
+import { loadPolicyConfig, applyPolicy, applyBaseline, applyInlineSuppressions, describePolicyEffect, matchGlob } from "./policy-engine.js";
 import { detectTrustSignals } from "./trust-signals.js";
-import { loadThreatIntel, checkThreatIntel } from "./threat-intel.js";
+import { loadThreatIntel, checkThreatIntel, isInertThreatFeedFile, getDetectionSetProvenance } from "./threat-intel.js";
 import { calculateRiskDimensions } from "./risk-engine.js";
 import { getChangedFiles } from "./diff-scanner.js";
 import { generateRemediations, generateFixSuggestions } from "./remediation-engine.js";
@@ -57,27 +93,70 @@ import { generatePlaybooks } from "./playbooks.js";
 import { buildAttackGraph } from "./attack-graph.js";
 import { validateFindings } from "./active-validation.js";
 import { modelWorkflows } from "./workflow-modeler.js";
-import { loadRiskHistory, analyzeRiskTrend, saveRiskHistory, getRiskTrend } from "./continuous-monitor.js";
-import { loadTriageDecisions, checkTriageGovernance } from "./triage-engine.js";
+import { scanWorkflowGraph } from "./workflow-graph.js";
+import { scanOpenClawPlugin } from "./openclaw-plugin-scanner.js";
+import { feedFreshness, feedStalenessFindings } from "./feed.js";
+import { checkRegistryVersionDrift } from "./publishing-anomaly-detector.js";
+import { readRiskHistory, riskHistoryUnreadableFinding, analyzeRiskTrend, saveRiskHistory, getRiskTrend } from "./continuous-monitor.js";
+import { readTriageDecisions, triageStoreUnreadableFinding, checkTriageGovernance } from "./triage-engine.js";
 import { forecastRisk } from "./risk-forecast.js";
 import { calculateMetrics } from "./metrics.js";
+import { checkSlaCompliance } from "./sla-engine.js";
 import {
   OBFUSCATION_V3_PATTERNS,
   PROVENANCE_PATTERNS,
 } from "./patterns.js";
 import { generateSbomDocument } from "./sbom-generator.js";
-import { verifySLSA, getSLSALevel } from "./slsa-verifier.js";
+import { verifySLSA, assessSLSA } from "./slsa-verifier.js";
 import { scanPypiDependencyConfusion } from "./dependency-confusion.js";
+import { scanMcpConfigs, hasMcpConfigFiles } from "./mcp-scanner.js";
+import { scanAgentSkillFiles } from "./skills-scanner.js";
+import {
+  isSelfScanInertFile,
+  isVerifiedSelfScanFile,
+} from "./self-scan-trust.js";
 
-const TOOL_VERSION = "5.2.0";
+const TOOL_VERSION = "6.0.7";
 
-/** Regex matching the scanner's own source files (pattern/IOC/threat-intel definitions). */
-const SCANNER_SOURCE_FILE =
-  /(?:patterns|scanner|playbooks|correlation-engine|ioc-blocklist|threat-intel|remediation-engine|secret-simulator|workflow-modeler|config-scanner|install-hook-scanner|github-trust-scanner|dependency-confusion|attack-graph|reporter|active-validation)\.(ts|js)$/;
+/**
+ * Pattern literals in this matcher module deliberately spell out signatures
+ * that the public scanner detects. Suppress only those exact rule definitions
+ * in a scanner-trusted own checkout. A same-named third-party file, or any
+ * unrelated rule in this file, remains fully scannable.
+ */
+const SELF_SCAN_INERT_PATTERN_RULES = new Map<string, ReadonlySet<string>>([
+  [
+    "src/broad-gap-pattern-matchers.ts",
+    new Set([
+      "XZ_BUILD_INJECT",
+      "CODECOV_EXFIL",
+      "VIDAR_WALLET_THEFT",
+      "DROPPER_ANTIVM",
+      "SHAI_HULUD_WORM",
+    ]),
+  ],
+  [
+    "dist/broad-gap-pattern-matchers.js",
+    new Set([
+      "XZ_BUILD_INJECT",
+      "CODECOV_EXFIL",
+      "VIDAR_WALLET_THEFT",
+      "DROPPER_ANTIVM",
+      "SHAI_HULUD_WORM",
+    ]),
+  ],
+]);
+
+function isSelfScanInertPatternRule(
+  relativePath: string,
+  rule: string,
+): boolean {
+  const normalizedPath = relativePath.replace(/\\/g, "/");
+  return SELF_SCAN_INERT_PATTERN_RULES.get(normalizedPath)?.has(rule) ?? false;
+}
 
 /** Detect test / spec / fixture / mock files. Shared constant (was duplicated inline). */
-const TEST_FILE_REGEX =
-  /[._-](test|spec|mock|fixture|stub|fake)\.|__tests__|\/tests?\/|conftest\.py/i;
+const TEST_FILE_REGEX = TEST_FILE_PATTERN;
 
 /**
  * Scan a local directory or GitHub repo for malware indicators.
@@ -91,16 +170,31 @@ export async function scan(options: ScanOptions): Promise<ScanReport> {
 
   // If target is a GitHub URL, clone it
   if (target.startsWith("https://github.com/")) {
+    // Strict allowlist for the clone target: reject anything that is not a
+    // clean https GitHub repo URL, so a crafted value cannot inject shell
+    // metacharacters or git options into the clone below.
+    if (
+      !/^https:\/\/github\.com\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+(?:\.git)?\/?$/.test(
+        target,
+      )
+    ) {
+      throw new Error(
+        `Refusing to clone: not a valid GitHub repository URL: ${target}`,
+      );
+    }
     scanType = "github";
-    tempDir = fs.mkdtempSync(path.join("/tmp", "scg-"));
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "scg-"));
+    const cloneDir = path.join(tempDir, "repo");
     try {
-      execSync(`git clone --depth 1 "${target}" "${tempDir}/repo"`, {
+      // execFileSync runs git directly without a shell, so the URL can never
+      // be interpreted as a command.
+      execFileSync("git", ["clone", "--depth", "1", target, cloneDir], {
         stdio: "pipe",
       });
     } catch {
       throw new Error(`Failed to clone repository: ${target}`);
     }
-    scanDir = path.join(tempDir, "repo");
+    scanDir = cloneDir;
   }
 
   // Validate directory exists
@@ -113,8 +207,50 @@ export async function scan(options: ScanOptions): Promise<ScanReport> {
     throw new Error(`Target is not a directory: ${scanDir}`);
   }
 
-  // Collect files (v4.5: diff mode filters to changed files only)
-  let allFiles = collectFiles(scanDir, options.maxDepth ?? 20);
+  // Load policy up front: its `ignore:` globs prune the scanner walk, and the
+  // same object is reused for the suppression passes further down.
+  const policy = loadPolicyConfig(scanDir);
+  const ignoreGlobs = policy?.ignore ?? [];
+  // v5.29 (issue 168): record WHAT the config turns off, not just how many
+  // findings it removed. `ignore:` never reached suppressedCount at all, since
+  // it prunes files here, before any rule runs; a scan narrowed that way used
+  // to be indistinguishable from a clean one in every output format.
+  const policyEffect = policy ? describePolicyEffect(policy) : undefined;
+
+  // Collect files (v4.5: diff mode filters to changed files only). Coverage
+  // failures are held separately so policy.ignore can remove out-of-scope
+  // directory failures before they become report findings.
+  const pathCoverageFindings: Finding[] = [];
+  let allFiles = collectFiles(
+    scanDir,
+    options.maxDepth ?? 20,
+    0,
+    pathCoverageFindings,
+    scanDir,
+    options.maxEntries,
+  );
+
+  // Config `ignore:` path globs: drop matching files from the scan (v5.13).
+  if (ignoreGlobs.length > 0) {
+    allFiles = allFiles.filter((f) => {
+      const rel = path.relative(scanDir, f).replace(/\\/g, "/");
+      return !ignoreGlobs.some((glob) => matchGlob(glob, rel));
+    });
+    for (let i = pathCoverageFindings.length - 1; i >= 0; i--) {
+      const rel = pathCoverageFindings[i]!.file ?? ".";
+      if (rel === ".") continue;
+      if (
+        ignoreGlobs.some(
+          (glob) =>
+            matchGlob(glob, rel) ||
+            matchGlob(glob, `${rel}/__scg_ignored__`),
+        )
+      ) {
+        pathCoverageFindings.splice(i, 1);
+      }
+    }
+  }
+
   if (options.sinceCommit && fs.existsSync(path.join(scanDir, ".git"))) {
     const changedFiles = new Set(getChangedFiles(scanDir, options.sinceCommit));
     if (changedFiles.size > 0) {
@@ -125,7 +261,16 @@ export async function scan(options: ScanOptions): Promise<ScanReport> {
   // v4.5: Load threat intelligence feed
   const threatFeed = loadThreatIntel();
 
-  let findings: Finding[] = [];
+  // Internal-disclosure deny-list. Loaded once: the hashed terms come from the
+  // committed policy file, the plaintext patterns from an unpublished file or
+  // the SCG_INTERNAL_DISCLOSURE_FILE environment variable. With nothing
+  // configured this is inert and only the built-in shape rules run.
+  const internalDisclosure = loadInternalDisclosureConfig(scanDir, policy);
+
+  let findings: Finding[] = [
+    ...pathCoverageFindings,
+    ...internalDisclosure.loadFindings,
+  ];
 
   // Scan each file
   let filesScanned = 0;
@@ -142,104 +287,251 @@ export async function scan(options: ScanOptions): Promise<ScanReport> {
       checkBinaryFile(relativePath, findings);
     }
 
-    // Scan Docker/Config files inline (v4.0)
-    if (isDockerFile(basename) || isConfigFile(basename)) {
-      try {
-        const content = fs.readFileSync(filePath, "utf-8");
-        if (isDockerFile(basename)) {
-          findings.push(...scanDockerFile(content, relativePath));
-        }
-        if (isConfigFile(basename)) {
-          findings.push(...scanConfigFile(content, relativePath));
-        }
-      } catch { /* skip */ }
-    }
-
-    // Only scan content of known file types
-    if (!SCANNABLE_EXTENSIONS.has(ext)) continue;
-
-    // Skip large files
-    const fileStat = fs.statSync(filePath);
-    if (fileStat.size > MAX_FILE_SIZE) continue;
-
-    filesScanned++;
-
+    // Digest match against KNOWN_MALICIOUS_HASHES, computed over the RAW BYTES.
+    //
+    // Runs BEFORE the SCANNABLE_EXTENSIONS gate on purpose. Hashing needs no
+    // parser, and most of that collection describes compiled payloads that
+    // carry no scannable extension, so they never reach the content scanners
+    // at all. Gating this on the extension list would leave exactly the
+    // artefacts the digests were collected for unreachable.
+    //
+    // Reading a file the content pass would otherwise skip is new I/O, which
+    // is why the same MAX_FILE_SIZE ceiling applies. A payload padded past
+    // that ceiling would no longer match its published digest anyway.
+    //
+    // The buffer is reused for the UTF-8 decode below, so a scannable file is
+    // still read exactly once.
+    let fileBytes: Buffer | undefined;
     try {
-      const content = fs.readFileSync(filePath, "utf-8");
-
-      // Check file content patterns
-      checkFilePatterns(content, relativePath, findings);
-
-      // Check build tool configs for plugin risks (v4.0)
-      if (BUILD_CONFIG_FILES.has(basename)) {
-        checkBuildToolPatterns(content, relativePath, findings);
-      }
-
-      // Check workspace/monorepo patterns (v4.0)
-      if (basename === "package.json" && relativePath === "package.json") {
-        checkMonorepoPatterns(content, relativePath, findings);
-      }
-
-      // Check beacon and miner patterns (T-008)
-      checkBeaconMinerPatterns(content, relativePath, findings);
-
-      // Entropy analysis for obfuscated payloads (v4.0)
-      const entropyFindings = analyzeEntropy(content, relativePath);
-      findings.push(...entropyFindings);
-
-      // IOC blocklist + threat-intel checks (skip scanner source/test files — they contain IOC definitions)
-      const normForIOC = relativePath.replace(/\\/g, "/");
-      const isIOCExcluded = SCANNER_SOURCE_FILE.test(normForIOC) || TEST_FILE_REGEX.test(normForIOC);
-      if (!isIOCExcluded) {
-        const iocFindings = checkIOCBlocklist(content, relativePath);
-        findings.push(...iocFindings);
-
-        const tiFindings = checkThreatIntel(content, relativePath, threatFeed);
-        findings.push(...tiFindings);
-      }
-
-      // README lure pattern scanning (v4.1)
-      if (basename.toLowerCase().startsWith("readme")) {
-        const lureFindings = scanReadmeLures(content, relativePath);
-        findings.push(...lureFindings);
-      }
-
-      // Check package.json specifically (skip test fixture directories)
-      const normPkgPath = relativePath.replace(/\\/g, "/");
-      if (basename === "package.json" && !TEST_FILE_REGEX.test(normPkgPath)) {
-        checkPackageJson(content, relativePath, findings);
-        // Check for binary download patterns in install scripts (T-007)
-        checkBinaryDownloadScripts(content, relativePath, findings);
-        // Check for known-bad package versions (v4.1)
-        checkKnownBadVersions(content, relativePath, findings);
-
-        // Deep install hook analysis (v4.2)
-        const hookScripts = extractInstallScripts(content);
-        if (hookScripts) {
-          const hookFindings = analyzeInstallHooks(hookScripts, relativePath);
-          findings.push(...hookFindings);
-        }
-
-        // Dependency risk analysis (v4.2)
-        try {
-          const pkg = JSON.parse(content) as Record<string, unknown>;
-          const allDeps = {
-            ...(pkg.dependencies as Record<string, string> | undefined),
-            ...(pkg.devDependencies as Record<string, string> | undefined),
-          };
-          if (Object.keys(allDeps).length > 0) {
-            const depFindings = analyzeDependencyRisks(allDeps, relativePath);
-            findings.push(...depFindings);
-          }
-        } catch { /* not valid JSON */ }
-      }
-
-      // Check package-lock.json for known-bad versions (v4.1)
-      if (basename === "package-lock.json") {
-        checkLockfileBadVersions(content, relativePath, findings);
+      if (fs.statSync(filePath).size <= MAX_FILE_SIZE) {
+        fileBytes = fs.readFileSync(filePath);
+        findings.push(...checkFileDigest(fileBytes, relativePath));
       }
     } catch {
-      // Skip files that can't be read (binary, permissions, etc.)
+      // Leave fileBytes undefined and stay silent here: the oversized and
+      // unreadable paths below own that accounting, and reporting it twice
+      // would double-count a single file.
+      fileBytes = undefined;
+    }
+
+    // Tracks whether the internal-disclosure pass already ran for this file.
+    // Dockerfiles and package-manager configs are read in the block below and
+    // some of them (.yarnrc.yml) also carry a scannable extension, so without
+    // this guard those files would be reported twice.
+    let internalDisclosureScanned = false;
+
+    // Scan Docker/Config files inline (v4.0). Keep I/O separate from analysis
+    // so an analyzer defect is never mislabeled as an unreadable path. These
+    // extensionless targets are first-class scanned files and obey the same
+    // size/read contract as extension-based source files.
+    let prefetchedContent: string | undefined;
+    const pathSegments = relativePath.split("/");
+    const nestedPythonLockfile =
+      relativePath.includes("/") &&
+      isPythonLockfile(basename) &&
+      !pathSegments.some((segment) => segment === "vendor" || segment === "target");
+    const inlineContentTarget =
+      isDockerFile(basename) || isConfigFile(basename) || nestedPythonLockfile;
+    if (inlineContentTarget) {
+      let inlineStat: fs.Stats;
+      try {
+        inlineStat = fs.statSync(filePath);
+      } catch {
+        recordUnreadablePath(findings, relativePath);
+        continue;
+      }
+      if (inlineStat.size > MAX_FILE_SIZE) {
+        findings.push(makeOversizedSkipFinding(relativePath, inlineStat.size));
+        continue;
+      }
+      try {
+        prefetchedContent =
+          fileBytes !== undefined
+            ? fileBytes.toString("utf-8")
+            : fs.readFileSync(filePath, "utf-8");
+      } catch {
+        recordUnreadablePath(findings, relativePath);
+        continue;
+      }
+
+      if (isDockerFile(basename)) {
+        findings.push(...scanDockerFile(prefetchedContent, relativePath));
+      }
+      if (isConfigFile(basename)) {
+        findings.push(...scanConfigFile(prefetchedContent, relativePath));
+      }
+      if (nestedPythonLockfile) {
+        findings.push(
+          ...scanPythonLockfileContent(
+            basename,
+            prefetchedContent,
+            relativePath,
+            threatFeed,
+          ),
+        );
+      }
+      // A Dockerfile FROM line and an .npmrc registry line are two of the
+      // most common places an internal host name reaches a public repo, and
+      // neither file carries a scannable extension.
+      findings.push(
+        ...scanInternalDisclosure(
+          prefetchedContent,
+          relativePath,
+          internalDisclosure,
+        ),
+      );
+      internalDisclosureScanned = true;
+    }
+
+    // Successfully analyzed extensionless Docker/config targets count once.
+    if (!SCANNABLE_EXTENSIONS.has(ext)) {
+      if (prefetchedContent !== undefined) filesScanned++;
+      continue;
+    }
+
+    // Skip large files - but never silently (issue #54): an oversized
+    // scannable file is a coverage gap an attacker can create on purpose
+    // (pad a payload past the limit to dodge content scanning).
+    let fileStat: fs.Stats;
+    try {
+      fileStat = fs.statSync(filePath);
+    } catch {
+      recordUnreadablePath(findings, relativePath);
+      continue;
+    }
+    if (fileStat.size > MAX_FILE_SIZE) {
+      findings.push(makeOversizedSkipFinding(relativePath, fileStat.size));
+      continue;
+    }
+
+    let content: string;
+    if (prefetchedContent !== undefined) {
+      content = prefetchedContent;
+    } else {
+      try {
+        content =
+          fileBytes !== undefined
+            ? fileBytes.toString("utf-8")
+            : fs.readFileSync(filePath, "utf-8");
+      } catch {
+        recordUnreadablePath(findings, relativePath);
+        continue;
+      }
+    }
+    filesScanned++;
+
+    // Skip supply-chain-guard's own published threat-feed data (feed.json /
+    // threat-feed.json): it intentionally carries raw IOC values as inert,
+    // structurally-validated detection data. Any deviation from the strict
+    // feed schema fails the check and the file is scanned normally.
+    if (isInertThreatFeedFile(relativePath, content)) continue;
+
+    // No target gets repository-wide trust. Only an exact inert path whose
+    // content matches the manifest shipped with the running scanner receives a
+    // narrow exemption. Location, clone URL and metadata are irrelevant; any
+    // content edit fails closed and is scanned normally.
+    const trustedOwnFile =
+      isSelfScanInertFile(relativePath) &&
+      fileBytes !== undefined &&
+      isVerifiedSelfScanFile(relativePath, fileBytes);
+
+    // Check file content patterns
+    checkFilePatterns(
+      content,
+      relativePath,
+      findings,
+      trustedOwnFile,
+    );
+
+    // Internal topology disclosure: private addresses, internal-only
+    // hostnames, non-public forge URLs, developer paths, plus the
+    // configured deny-list. Reported at medium/low, so the family cannot
+    // change the exit code of an existing --fail-on high pipeline.
+    if (!internalDisclosureScanned) {
+      findings.push(
+        ...scanInternalDisclosure(content, relativePath, internalDisclosure),
+      );
+    }
+
+    // Check build tool configs for plugin risks (v4.0)
+    if (BUILD_CONFIG_FILES.has(basename)) {
+      checkBuildToolPatterns(content, relativePath, findings);
+    }
+
+    // Check workspace/monorepo patterns (v4.0)
+    if (basename === "package.json" && relativePath === "package.json") {
+      checkMonorepoPatterns(content, relativePath, findings);
+    }
+
+    // Check beacon and miner patterns (T-008)
+    checkBeaconMinerPatterns(content, relativePath, findings, trustedOwnFile);
+
+    // Entropy analysis for obfuscated payloads (v4.0)
+    const entropyFindings = analyzeEntropy(content, relativePath);
+    findings.push(...entropyFindings);
+
+    // IOC blocklist + threat-intel checks skip only reviewed scanner
+    // definition/fixture paths and exact TypeScript-compiled counterparts.
+    if (!trustedOwnFile) {
+      const iocFindings = checkIOCBlocklist(content, relativePath);
+      findings.push(...iocFindings);
+
+      const tiFindings = checkThreatIntel(content, relativePath, threatFeed);
+      findings.push(...tiFindings);
+    }
+
+    // README / doc-file lure pattern scanning (v4.1, scope expanded v5.2.20)
+    // Covers README, CHANGELOG, CONTRIBUTING, DESCRIPTION, release-notes -
+    // matches LURE_PATTERNS' onlyFilePattern. Previously only `readme*`
+    // files were routed here, but the LURE patterns themselves are scoped
+    // to all of these. After v5.2.20 removed LURE_PATTERNS from the
+    // general checkFilePatterns sweep (dedupe fix), scanReadmeLures became
+    // the sole entry point so it now covers the full doc-file family.
+    if (/^(?:readme|changelog|contributing|description|release[-_]notes)/i.test(basename)) {
+      const lureFindings = scanReadmeLures(content, relativePath);
+      findings.push(...lureFindings);
+    }
+
+    // Check package.json specifically (skip test fixture directories)
+    const normPkgPath = relativePath.replace(/\\/g, "/");
+    if (basename === "package.json" && !TEST_FILE_REGEX.test(normPkgPath)) {
+      checkPackageJson(content, relativePath, findings);
+      // Check for binary download patterns in install scripts (T-007)
+      checkBinaryDownloadScripts(content, relativePath, findings);
+      // Check for known-bad package versions (v4.1)
+      checkKnownBadVersions(content, relativePath, findings);
+      // Flag dependency names matching a known-malicious/typosquat pattern.
+      // Closes the gap where a directory scan of your own repo did not catch
+      // a known-bad dependency (only the `npm <pkg>` path did). Patterns are
+      // anchored, so only exact malicious names match.
+      checkMaliciousDependencyNames(content, relativePath, findings, threatFeed);
+
+      // Deep install hook analysis (v4.2)
+      const hookScripts = extractInstallScripts(content);
+      if (hookScripts) {
+        const hookFindings = analyzeInstallHooks(hookScripts, relativePath);
+        findings.push(...hookFindings);
+      }
+
+      // Dependency risk analysis (v4.2)
+      try {
+        const parsed: unknown = JSON.parse(content);
+        if (!isJsonObject(parsed)) throw new TypeError("package.json is not an object");
+        const pkg = parsed;
+        const allDeps = {
+          ...(pkg.dependencies as Record<string, string> | undefined),
+          ...(pkg.devDependencies as Record<string, string> | undefined),
+        };
+        if (Object.keys(allDeps).length > 0) {
+          const depFindings = analyzeDependencyRisks(allDeps, relativePath);
+          findings.push(...depFindings);
+        }
+      } catch { /* not valid JSON */ }
+    }
+
+    // Check package-lock.json for known-bad versions (v4.1)
+    if (basename === "package-lock.json") {
+      checkLockfileBadVersions(content, relativePath, findings, threatFeed);
     }
   }
 
@@ -256,6 +548,9 @@ export async function scan(options: ScanOptions): Promise<ScanReport> {
   const ghaFindings = scanGitHubActionsWorkflows(scanDir);
   findings.push(...ghaFindings);
 
+  // v5.10: GitHub Agentic Workflow (gh-aw) markdown files (.github/workflows/*.md)
+  findings.push(...scanAgenticWorkflows(scanDir));
+
   // v4.9: SLSA provenance verification
   findings.push(...verifySLSA(scanDir));
 
@@ -264,6 +559,14 @@ export async function scan(options: ScanOptions): Promise<ScanReport> {
     const pypiConfusion = await scanPypiDependencyConfusion(scanDir);
     findings.push(...pypiConfusion);
   } catch { /* skip if offline */ }
+
+  // v5.9: opt-in registry version-drift (source package.json vs npm 'latest').
+  // Network call, so off by default; --check-registry enables it. Offline-safe.
+  if (options.checkRegistry) {
+    try {
+      findings.push(...(await checkRegistryVersionDrift(scanDir)));
+    } catch { /* offline / registry error: skip */ }
+  }
 
   // GitHub trust signal analysis (v4.1)
   if (scanType === "github") {
@@ -274,35 +577,50 @@ export async function scan(options: ScanOptions): Promise<ScanReport> {
     }
   }
 
-  // Check Dockerfile / container configs (v4.0)
-  const dockerFindings = scanDockerFiles(scanDir);
-  findings.push(...dockerFindings);
+  // Docker and package-manager config files were already scanned inline in the
+  // policy-filtered file walk. A second directory pass duplicated findings and
+  // bypassed ignore globs.
 
-  // Check package manager config files (v4.0)
-  const configFindings = scanConfigFiles(scanDir);
-  findings.push(...configFindings);
+  // Explicit specialized targets perform their own tri-state path probes.
+  // Calling them without existsSync gates preserves the distinction between an
+  // absent optional target and a target whose stat/read operation failed.
+  findings.push(...scanGitSecurity(scanDir));
+  findings.push(...scanCargoFiles(scanDir));
+  findings.push(...scanGoFiles(scanDir));
+  findings.push(...scanRubyGemsFiles(scanDir));
+  findings.push(...scanComposerFiles(scanDir));
 
-  // Check git hooks and submodules (v4.0)
-  if (fs.existsSync(path.join(scanDir, ".git"))) {
-    const gitSecFindings = scanGitSecurity(scanDir);
-    findings.push(...gitSecFindings);
+  // NuGet discovery is a root-directory optimization that deliberately opens
+  // the scanner on enumeration failure so scanNuGetFiles can report coverage.
+  if (hasNuGetFiles(scanDir)) {
+    findings.push(...scanNuGetFiles(scanDir));
   }
 
-  // Check Cargo/Rust files (v4.0)
-  if (fs.existsSync(path.join(scanDir, "Cargo.toml"))) {
-    const cargoFindings = scanCargoFiles(scanDir);
-    findings.push(...cargoFindings);
-  }
+  findings.push(...scanPythonLockfiles(scanDir));
 
-  // Check Go module files (v4.0)
-  if (fs.existsSync(path.join(scanDir, "go.mod"))) {
-    const goFindings = scanGoFiles(scanDir);
-    findings.push(...goFindings);
+  // Check MCP server configs (.mcp.json / .cursor/mcp.json / .vscode/mcp.json /
+  // claude_desktop_config.json / .gemini/settings.json)
+  if (hasMcpConfigFiles(scanDir)) {
+    const mcpFindings = scanMcpConfigs(scanDir);
+    findings.push(...mcpFindings);
   }
+  // Check AI agent skill / rules files (.claude, .cursorrules, CLAUDE.md, ...)
+  // The main walk skips .claude/ - this scanner does its own targeted traversal.
+  const skillFindings = scanAgentSkillFiles(scanDir);
+  findings.push(...skillFindings);
+
+  // v5.7: OpenClaw plugin manifest posture (only fires if openclaw.plugin.json present)
+  findings.push(...scanOpenClawPlugin(scanDir));
 
   // v4.7: Workflow execution modeling
   const wfFindings = modelWorkflows(scanDir);
   findings.push(...wfFindings);
+
+  // v5.7: Cross-workflow trust-boundary analysis (Cordyceps composition attacks).
+  // Runs across ALL workflow files - catches the producer->consumer artifact
+  // escalation that the single-file GHA scanner and modeler cannot see.
+  const wfGraphFindings = scanWorkflowGraph(scanDir);
+  findings.push(...wfGraphFindings);
 
   // v4.4: Detect positive trust signals (only for GitHub repo scans)
   if (scanType === "github") {
@@ -310,35 +628,223 @@ export async function scan(options: ScanOptions): Promise<ScanReport> {
     findings.push(...trustSignals);
   }
 
+  // Report the age of the rule set this scan actually matched against. Every
+  // other finding describes the scanned repository; this one describes what
+  // the scanner was able to look for, which until now no output carried. It is
+  // measured over `threatFeed` (the merged bundled + refreshed-cache list that
+  // checkThreatIntel and matchPackageIOC consumed above), so a consumer that
+  // refreshes the feed is reported current even on an old pin, and a consumer
+  // on a frozen pin is told so instead of receiving another green check.
+  // Carries no `file`, so the path-ignore filter below leaves it in place.
+  findings.push(...feedStalenessFindings(feedFreshness(threatFeed)));
+
+  // Apply path ignores to out-of-band scanners too. The primary file walk was
+  // pruned before scanning, but Git/lockfile/agent scanners discover their own
+  // targets and must honor the same path contract, including coverage findings.
+  if (ignoreGlobs.length > 0) {
+    findings = findings.filter((finding) => {
+      if (!finding.file) return true;
+      const relative = finding.file.replace(/\\/g, "/");
+      if (finding.rule === "PATH_SCAN_INCOMPLETE" && relative === ".") {
+        return true;
+      }
+      return !ignoreGlobs.some(
+        (glob) =>
+          matchGlob(glob, relative) ||
+          matchGlob(glob, `${relative}/__scg_ignored__`),
+      );
+    });
+  }
+
+  // The primary walk and specialized scanners may report the same failed path.
+  // Keep one public coverage signal per normalized relative path.
+  const seenIncompletePaths = new Set<string>();
+  findings = findings.filter((finding) => {
+    if (finding.rule !== "PATH_SCAN_INCOMPLETE") return true;
+    const publicPath = normalizePublicCoveragePath(finding.file ?? ".");
+    if (seenIncompletePaths.has(publicPath)) return false;
+    seenIncompletePaths.add(publicPath);
+    finding.file = publicPath;
+    return true;
+  });
+
+  // A scan that opened NO file is a verdict with no denominator (unreleased, issue
+  // 205). Every realistic cause is an ordinary CI accident - a checkout step
+  // that did not run, a working directory set to the wrong path, a sparse
+  // checkout, a container that mounted an empty volume - and until this finding
+  // existed the badge, SARIF, GitLab and JUnit artefacts of such a run were
+  // byte-identical to those of a real clean tree.
+  //
+  // This is the ONE place zero coverage is detected. SCAN_ZERO_COVERAGE is in
+  // PARTIAL_SCAN_RULES, so the flag below picks it up and every renderer that
+  // already honours partial coverage reports it. Deleting either this push or
+  // that PARTIAL_SCAN_RULES entry restores the false green.
+  // Two different things were conflated here. Issue 205 is a scan of an EMPTY
+  // TREE - a checkout that did not run, a wrong working directory, a sparse
+  // checkout, an empty mounted volume. A repository written in a language this
+  // scanner does not read is NOT that: it has files, they simply carry no
+  // scannable extension. Firing the same blocking finding on both turned exit 0
+  // into exit 1 and a brightgreen badge into an orange one for every ordinary
+  // Java, C#, Ruby, PHP, Kotlin, Swift or plain-HTML project, with remediation
+  // text naming only causes that do not apply. Measured on a two-file Maven
+  // project before this split.
+  if (allFiles.length === 0) {
+    findings.push({
+      rule: "SCAN_ZERO_COVERAGE",
+      description:
+        `No file was examined: ${filesScanned} of ${allFiles.length} in-scope files were scanned. ` +
+        "This result describes nothing about the target and cannot be a clean verdict.",
+      severity: "info",
+      confidence: 1,
+      category: "info",
+      match: "zero coverage",
+      recommendation:
+        "Treat this result as not assessed, never as clean. Check that the checkout ran, that the " +
+        "scan target is the intended directory, and that depth limits, ignore globs or a sparse " +
+        "checkout have not excluded the whole tree, then run the scan again.",
+    });
+  }
+
+  // The tree has content, none of it in the scannable set. Informational and
+  // deliberately NOT in PARTIAL_SCAN_RULES: "this tool does not read that
+  // language" is a statement about the tool, not a coverage gap in the run, and
+  // treating it as partial fails builds that are behaving correctly. It still
+  // says so out loud, so it cannot be mistaken for a clean verdict either.
+  if (allFiles.length > 0 && filesScanned === 0) {
+    findings.push({
+      rule: "SCAN_NO_SCANNABLE_FILES",
+      description:
+        `No file was examined: 0 of ${allFiles.length} in-scope files carry an extension ` +
+        "this scanner reads. The tree is not empty; its contents are outside the scanned set. " +
+        "This result says nothing about the source, and it is not a clean verdict.",
+      severity: "info",
+      confidence: 1,
+      category: "info",
+      match: "no scannable files",
+      recommendation:
+        "Treat this as not assessed for source patterns rather than as clean. Dependency, " +
+        "workflow and provenance checks still ran wherever their inputs existed. If this " +
+        "project should be pattern-scanned, its language is not yet in the scanned set.",
+    });
+  }
+
+  // Preserve completeness independently of policy, baseline, or severity filters.
+  // A user may hide the informational finding, but that cannot turn a partial
+  // evaluation into a complete report.
+  let partialScan = hasPartialScanFinding(findings);
+
   // v4.7: Active validation (assign confidence tiers, rationale, evidence)
   validateFindings(findings);
 
-  // v4.2: Correlation engine — link findings into incidents
+  // v5.4.2: Apply policy BEFORE all downstream analytics. Correlation, trust
+  // breakdown, trend/forecast and governance previously consumed raw findings,
+  // so policy-suppressed findings leaked into "incidents" (a clean report
+  // showed a 100%-confidence worm incident built from suppressed FPs) and the
+  // trend check compared a pre-suppression score against the post-suppression
+  // history (guaranteed phantom RISK_TREND_SPIKE on the second scan of any
+  // repo with suppressions). Same bug class as the v5.2.40 SARIF/SBOM leak.
+  let suppressedCount = 0;
+  // v5.29: findings a `suppress:` entry removed. Kept out of `findings` on
+  // purpose (see applyPolicy) and used only to build the SBOM VEX statements,
+  // which previously could never fire because the objects were dropped here.
+  const policySuppressed: Finding[] = [];
+
+  // Inline // scg-ignore-next-line RULE / # scg-ignore-next-line RULE comments:
+  // drop a finding when the source line directly above it carries the directive.
+  const inlineResult = applyInlineSuppressions(findings, scanDir);
+  findings = inlineResult.findings;
+  suppressedCount += inlineResult.suppressedCount;
+
+  if (policy) {
+    const policyResult = applyPolicy(findings, policy);
+    findings = policyResult.findings;
+    suppressedCount += policyResult.suppressedCount;
+    policySuppressed.push(...policyResult.suppressedFindings);
+  }
+  // Policy validation findings are materialized by applyPolicy(), so refresh
+  // the snapshot before later filters can hide a coverage-breaking warning.
+  partialScan ||= hasPartialScanFinding(findings);
+
+  // v4.2: Correlation engine - link findings into incidents
   const correlation = correlateFindings(findings);
 
   // v4.2: Trust breakdown (for directory/github scans with package.json)
   const hasLockfile = fs.existsSync(path.join(scanDir, "package-lock.json"));
-  const trustBreakdown = calculateTrustBreakdown(findings, target, hasLockfile);
+  const trustBreakdown = calculateTrustBreakdown(findings, target, hasLockfile, scanType);
 
-  // v4.8: Continuous risk monitoring
-  const riskHistory = loadRiskHistory(scanDir);
+  // v4.8: Continuous risk monitoring (scores are now post-suppression,
+  // matching what saveRiskHistory persists)
+  //
+  // An absent history is a first scan and stays silent. A history file that
+  // exists but cannot be read is lost evidence, and it must not be reported as
+  // the same clean empty baseline: every trend and forecast rule below then
+  // finds nothing while the scan still reports success, which is how a corrupt
+  // state file flipped the default gate from fail to pass with the scanned code
+  // unchanged. This read is deliberately NOT gated on `--no-history`: that flag
+  // suppresses the write only, so a corrupt file still degrades this verdict
+  // and still has to be reported.
+  //
+  // `partialScan` is set here rather than left to `hasPartialScanFinding`
+  // because the second policy pass and the severity filter below both run after
+  // this point and can remove the finding. That is the same reasoning as the
+  // refresh above: a suppression filter may hide a finding, and may never turn
+  // incomplete coverage into a complete clean verdict. Setting the flag here
+  // also keeps the save at the end of this function from overwriting the
+  // unreadable file, which is what preserves the recoverable entries in it.
+  const historyRead = readRiskHistory(scanDir);
+  const riskHistory = historyRead.entries;
+  if (historyRead.status === "unreadable") partialScan = true;
+
   const trendFindings = analyzeRiskTrend(riskHistory, calculateScore(findings));
   findings.push(...trendFindings);
   const forecastFindings = forecastRisk(riskHistory, calculateScore(findings));
   findings.push(...forecastFindings);
 
+  // Pushed after the two analyzers, not before, so the current score they are
+  // given is a score of the scanned project and never includes this finding
+  // about the scanner's own state file. Today that ordering cannot change an
+  // outcome, because an unreadable history yields zero entries and both
+  // analyzers return early on a short history; the ordering is here so that
+  // stays true if either early return is ever relaxed.
+  if (historyRead.status === "unreadable") {
+    findings.push(riskHistoryUnreadableFinding(historyRead.reason ?? "read-failed"));
+  }
+
   // v4.8: Triage governance checks
-  const triageDecisions = loadTriageDecisions(scanDir);
+  //
+  // Same three-way read as the history above, and for the same measured reason:
+  // a truncated triage store took this scan from exit 1 with two high findings
+  // to exit 0 with none, and reported metrics.slaComplianceRate 100 where the
+  // intact store gave 0. See src/triage-engine.ts for the measurement.
+  const triageRead = readTriageDecisions(scanDir);
+  const triageDecisions = triageRead.entries;
+  if (triageRead.status === "unreadable") partialScan = true;
+
   const govFindings = checkTriageGovernance(findings, triageDecisions);
   findings.push(...govFindings);
+  // Issue 194: the SLA engine was exported and tested, and never called.
+  // SLA_BREACH_CRITICAL and SLA_AT_RISK therefore could not reach a scan
+  // report. Same decisions the governance check just read; same default SLA
+  // calculateMetrics uses. A configuration surface, if one is added, must
+  // reach both.
+  findings.push(...checkSlaCompliance(triageDecisions));
 
-  // v4.4: Apply policy config (if present)
-  let suppressedCount = 0;
-  const policy = loadPolicyConfig(scanDir);
+  // Pushed after checkTriageGovernance for the same reason as the history
+  // finding above: the governance rules read the findings list, so a finding
+  // about the scanner's own state file is kept out of the input they judge.
+  if (triageRead.status === "unreadable") {
+    findings.push(triageStoreUnreadableFinding(triageRead.reason ?? "read-failed"));
+  }
+
+  // v5.4.2: Second policy pass over the late-added findings (trend, forecast,
+  // governance) so rules like RISK_TREND_SPIKE stay suppressible. Findings
+  // removed by the first pass are already gone; this only affects the
+  // additions above.
   if (policy) {
-    const policyResult = applyPolicy(findings, policy);
-    findings = policyResult.findings;
-    suppressedCount += policyResult.suppressedCount;
+    const latePass = applyPolicy(findings, policy);
+    findings = latePass.findings;
+    suppressedCount += latePass.suppressedCount;
+    policySuppressed.push(...latePass.suppressedFindings);
   }
 
   // v4.4: Apply baseline (if configured)
@@ -360,15 +866,32 @@ export async function scan(options: ScanOptions): Promise<ScanReport> {
   const baseScore = calculateScore(filteredFindings);
   const score = Math.min(100, baseScore + correlation.riskBoost);
   const riskLevel = getRiskLevel(score);
-  const recommendations = generateRecommendations(filteredFindings);
+  const recommendations = generateRecommendations(filteredFindings, partialScan);
 
-  // v4.8: Calculate metrics and save history
-  const metrics = calculateMetrics(filteredFindings, riskHistory, triageDecisions);
+  // v4.8: Calculate metrics and save history.
+  //
+  // No SLA configuration is passed because this project exposes no surface to
+  // configure one: `SlaConfig` has no home in `PolicyConfig` and no CLI flag, so
+  // the built-in default in src/sla-engine.ts is the only SLA in effect. If a
+  // configuration surface is added, it must reach BOTH calculateMetrics and
+  // checkSlaCompliance; wiring one and not the other reintroduces the split that
+  // made slaComplianceRate contradict the SLA engine.
+  const metrics = calculateMetrics(filteredFindings, riskHistory, triageDecisions, undefined, score);
 
-  // Save risk history for trend tracking (skip temp dirs)
-  if (!tempDir) {
+  // Save risk history for trend tracking (skip temp dirs; --no-history lets
+  // read-only callers like the pre-commit hook avoid writing state into the
+  // scanned repo). Partial results are not comparable measurements and must
+  // never become a zero-score baseline for later trend/forecast analysis.
+  if (!tempDir && !options.noHistory && !partialScan) {
     try { saveRiskHistory(scanDir, { timestamp: new Date().toISOString(), score, findings: filteredFindings, summary, riskLevel, recommendations, target, scanType, tool: `supply-chain-guard v${TOOL_VERSION}`, durationMs: Date.now() - startTime }); } catch { /* skip */ }
   }
+
+  // Read provenance and SLSA assessment before the temp directory is removed:
+  // a github scan's scanDir lives inside it, and an assessment taken afterwards
+  // would silently grade an empty path as Level 0 / non-git.
+  const gitProv = resolveGitProvenance(scanDir);
+  const detectionSet = getDetectionSetProvenance();
+  const slsaAssessment = assessSLSA(scanDir);
 
   // Cleanup temp directory
   if (tempDir) {
@@ -389,6 +912,8 @@ export async function scan(options: ScanOptions): Promise<ScanReport> {
     incidents: correlation.incidents.length > 0 ? correlation.incidents : undefined,
     trustBreakdown,
     suppressedCount: suppressedCount > 0 ? suppressedCount : undefined,
+    policyEffect,
+    partialScan: partialScan || undefined,
     riskDimensions: calculateRiskDimensions(filteredFindings),
     remediations: generateRemediations(filteredFindings),
     fixSuggestions: generateFixSuggestions(filteredFindings),
@@ -401,54 +926,98 @@ export async function scan(options: ScanOptions): Promise<ScanReport> {
     riskHistory: riskHistory.length > 0 ? riskHistory : undefined,
     metrics,
     // v4.9: CycloneDX 1.6 SBOM from actual dependency inventory
-    sbomDocument: generateSbomDocument(scanDir, filteredFindings),
-    // v4.9: SLSA provenance level
-    slsaLevel: getSLSALevel(scanDir),
+    sbomDocument: generateSbomDocument(scanDir, filteredFindings, policySuppressed),
+    // v4.9: SLSA provenance level. Unreleased: the level and the record of what
+    // produced it come from ONE assessment, so a renderer can never show the
+    // number without the checks that were and were not run behind it.
+    slsaLevel: slsaAssessment.level,
+    slsaAssessment,
+    // v5.29 (issue #208): Scanned commit provenance and detection set metadata
+    commit: gitProv.commit,
+    branch: gitProv.branch,
+    repositoryUri: gitProv.repositoryUri,
+    detectionSet,
   };
+}
+
+/**
+ * Resolve git commit revision, branch, and remote URL if scanDir is a git repository (v5.29, issue #208).
+ */
+function resolveGitProvenance(scanDir: string): {
+  commit?: string;
+  branch?: string;
+  repositoryUri?: string;
+} {
+  try {
+    const isGit =
+      execSync("git rev-parse --is-inside-work-tree", {
+        cwd: scanDir,
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim() === "true";
+    if (!isGit) return {};
+
+    const commit = execSync("git rev-parse HEAD", {
+      cwd: scanDir,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+
+    let branch: string | undefined;
+    try {
+      const b = execSync("git rev-parse --abbrev-ref HEAD", {
+        cwd: scanDir,
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+      if (b && b !== "HEAD") branch = b;
+    } catch {}
+
+    let repositoryUri: string | undefined;
+    try {
+      const u = execSync("git config --get remote.origin.url", {
+        cwd: scanDir,
+        encoding: "utf-8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+      if (u) repositoryUri = u;
+    } catch {}
+
+    return { commit: commit || undefined, branch, repositoryUri };
+  } catch {
+    return {};
+  }
 }
 
 /**
  * Recursively collect all files in a directory.
  */
-function collectFiles(dir: string, maxDepth: number, depth = 0): string[] {
-  if (depth > maxDepth) return [];
-
-  const files: string[] = [];
-  let entries: fs.Dirent[];
-
-  try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return files;
-  }
-
-  for (const entry of entries) {
-    const fullPath = path.join(dir, entry.name);
-
-    // Skip common non-relevant directories
-    if (entry.isDirectory()) {
-      if (
-        entry.name === "node_modules" ||
-        entry.name === ".git" ||
-        entry.name === "dist" ||
-        entry.name === "build" ||
-        entry.name === ".next" ||
-        entry.name === "__pycache__" ||
-        entry.name === ".venv" ||
-        entry.name === "venv" ||
-        entry.name === ".claude"
-      ) {
-        continue;
-      }
-      files.push(...collectFiles(fullPath, maxDepth, depth + 1));
-    } else if (entry.isFile()) {
-      files.push(fullPath);
-    }
-  }
-
-  return files;
+function collectFiles(
+  dir: string,
+  maxDepth: number,
+  _depth = 0,
+  findings: Finding[] = [],
+  _rootDir = dir,
+  maxEntries?: number,
+): string[] {
+  const excludedDirectories = new Set([
+    "node_modules",
+    ".git",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".claude",
+    ".scg-history",
+    ".scg-cache",
+  ]);
+  return collectExtractedFiles(dir, findings, {
+    maxDepth,
+    maxEntries: maxEntries === undefined
+      ? DEFAULT_EXTRACTED_WALK_MAX_ENTRIES
+      : Math.min(maxEntries, DEFAULT_EXTRACTED_WALK_MAX_ENTRIES),
+    shouldEnterDirectory: (name) => !excludedDirectories.has(name),
+  });
 }
-
 /**
  * Check if a filename matches known suspicious patterns.
  */
@@ -458,8 +1027,13 @@ function checkSuspiciousFileName(
   findings: Finding[],
 ): void {
   for (const suspicious of SUSPICIOUS_FILES) {
-    const regex = new RegExp(suspicious.pattern);
-    if (regex.test(basename)) {
+    const hits = matchPatternInSemanticText(
+      suspicious,
+      basename,
+      relativePath,
+      findings,
+    );
+    if (hits && hits.length > 0) {
       findings.push({
         rule: suspicious.rule,
         description: suspicious.description,
@@ -478,8 +1052,13 @@ function checkFilePatterns(
   content: string,
   relativePath: string,
   findings: Finding[],
+  trustedOwnFile: boolean,
 ): void {
-  const lines = content.split("\n");
+  // Note: LURE_PATTERNS deliberately excluded here. README-style files are
+  // already covered by scanReadmeLures() in github-trust-scanner.ts (called
+  // earlier in scanDirectory). Including them in this loop produced duplicate
+  // findings for every README hit (same rule+file+line+match, different
+  // recommendation text). v5.2.20 dedupe fix.
   const allPatterns = [
     ...FILE_PATTERNS,
     ...CAMPAIGN_PATTERNS,
@@ -487,46 +1066,37 @@ function checkFilePatterns(
     ...OBFUSCATION_PATTERNS_V2,
     ...IAC_PATTERNS,
     ...INFOSTEALER_PATTERNS,
-    ...LURE_PATTERNS,
+    ...PROMPT_INJECTION_PATTERNS,
     ...C2_EXTENDED_PATTERNS,
     ...SECRETS_PATTERNS,
     ...OBFUSCATION_V3_PATTERNS,
     ...PROVENANCE_PATTERNS,
   ];
 
-  const fileExt = path.extname(relativePath).toLowerCase();
-  // Normalise path separators for cross-platform regex matching
-  const normalizedPath = relativePath.replace(/\\/g, "/");
-  const isTestFile = TEST_FILE_REGEX.test(normalizedPath);
-
   for (const pattern of allPatterns) {
-    // Respect onlyExtensions restriction (e.g. SVG_SCRIPT_INJECTION → .svg only)
-    if (pattern.onlyExtensions && !pattern.onlyExtensions.includes(fileExt)) continue;
-    // Respect onlyFilePattern (e.g. README_LURE → README/docs files only)
-    if (pattern.onlyFilePattern && !pattern.onlyFilePattern.test(normalizedPath)) continue;
-    // Respect notFilePattern (e.g. skip .min.js for framework-heavy patterns)
-    if (pattern.notFilePattern  && pattern.notFilePattern.test(normalizedPath))  continue;
-    // Skip test/spec/fixture files for patterns marked notTestFile
-    if (pattern.notTestFile     && isTestFile)                                    continue;
-
-    const regex = new RegExp(pattern.pattern, "g");
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      const match = regex.exec(line);
-      if (match) {
-        findings.push({
-          rule: pattern.rule,
-          description: pattern.description,
-          severity: pattern.severity,
-          file: relativePath,
-          line: i + 1,
-          match: truncateMatch(match[0]),
-          recommendation: getRecommendation(pattern.rule),
-        });
-        // Reset regex lastIndex for next line
-        regex.lastIndex = 0;
+    const hits = matchPatternInFile(
+      pattern,
+      content,
+      relativePath,
+      findings,
+      "g",
+    );
+    for (const hit of hits ?? []) {
+      if (
+        trustedOwnFile &&
+        isSelfScanInertPatternRule(relativePath, pattern.rule)
+      ) {
+        continue;
       }
+      findings.push({
+        rule: pattern.rule,
+        description: pattern.description,
+        severity: pattern.severity,
+        file: relativePath,
+        line: hit.line,
+        match: truncateMatch(hit.text),
+        recommendation: getRecommendation(pattern.rule),
+      });
     }
   }
 }
@@ -539,26 +1109,29 @@ function checkPackageJson(
   relativePath: string,
   findings: Finding[],
 ): void {
-  let pkg: Record<string, unknown>;
-  try {
-    pkg = JSON.parse(content) as Record<string, unknown>;
-  } catch {
-    return;
-  }
+  const pkg = parseJsonObject(content);
+  if (!pkg) return;
 
   const scripts = pkg.scripts as Record<string, string> | undefined;
   if (!scripts) return;
 
-  const dangerousHooks = ["preinstall", "postinstall", "preuninstall", "postuninstall"];
-
-  for (const hook of dangerousHooks) {
+  // Shared with npm-scanner.ts and install-hook-scanner.ts so the three paths
+  // cannot drift apart again; see AUTO_RUN_LIFECYCLE_HOOKS for why each name
+  // is in the list and why prepublishOnly is not.
+  for (const hook of AUTO_RUN_LIFECYCLE_HOOKS) {
     const script = scripts[hook];
     if (!script) continue;
 
     // Check against suspicious script patterns
     for (const pattern of SUSPICIOUS_SCRIPTS) {
-      const regex = new RegExp(pattern.pattern, "i");
-      if (regex.test(script)) {
+      const hits = matchPatternInFile(
+        pattern,
+        script,
+        relativePath,
+        findings,
+        "i",
+      );
+      if (hits && hits.length > 0) {
         findings.push({
           rule: pattern.rule,
           description: `${hook}: ${pattern.description}`,
@@ -597,8 +1170,9 @@ function checkPackageJson(
  */
 function checkGitDateAnomalies(dir: string, findings: Finding[]): void {
   try {
-    const log = execSync(
-      `git -C "${dir}" log --format="%H|%aI|%cI" -20 2>/dev/null`,
+    const log = execFileSync(
+      "git",
+      ["-C", dir, "log", "--format=%H|%aI|%cI", "-20"],
       { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
     );
 
@@ -666,12 +1240,8 @@ function checkBinaryDownloadScripts(
   relativePath: string,
   findings: Finding[],
 ): void {
-  let pkg: Record<string, unknown>;
-  try {
-    pkg = JSON.parse(content) as Record<string, unknown>;
-  } catch {
-    return;
-  }
+  const pkg = parseJsonObject(content);
+  if (!pkg) return;
 
   const scripts = pkg.scripts as Record<string, string> | undefined;
   if (!scripts) return;
@@ -686,8 +1256,14 @@ function checkBinaryDownloadScripts(
     if (!script) continue;
 
     for (const pattern of BINARY_DOWNLOAD_PATTERNS) {
-      const regex = new RegExp(pattern.pattern, "i");
-      if (regex.test(script)) {
+      const hits = matchPatternInFile(
+        pattern,
+        script,
+        relativePath,
+        findings,
+        "i",
+      );
+      if (hits && hits.length > 0) {
         findings.push({
           rule: pattern.rule,
           description: `${hook}: ${pattern.description}${isKnownNative ? " (known native package)" : ""}`,
@@ -710,39 +1286,31 @@ function checkBeaconMinerPatterns(
   content: string,
   relativePath: string,
   findings: Finding[],
+  trustedOwnFile: boolean,
 ): void {
-  const lines = content.split("\n");
-  const normalizedPath = relativePath.replace(/\\/g, "/");
-  const isTestFile = TEST_FILE_REGEX.test(normalizedPath);
-
   for (const pattern of BEACON_MINER_PATTERNS) {
-    // Apply context-aware file filters (same guards as checkFilePatterns)
-    if (pattern.onlyFilePattern && !pattern.onlyFilePattern.test(normalizedPath)) continue;
-    if (pattern.notFilePattern  && pattern.notFilePattern.test(normalizedPath))  continue;
-    if (pattern.notTestFile     && isTestFile)                                    continue;
-
-    const regex = new RegExp(pattern.pattern, "gi");
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i] ?? "";
-      const match = regex.exec(line);
-      if (match) {
-        findings.push({
-          rule: pattern.rule,
-          description: pattern.description,
-          severity: pattern.severity,
-          file: relativePath,
-          line: i + 1,
-          match: truncateMatch(match[0]),
-          recommendation: getRecommendation(pattern.rule),
-        });
-        regex.lastIndex = 0;
-      }
+    const hits = matchPatternInFile(
+      pattern,
+      content,
+      relativePath,
+      findings,
+      "gi",
+    );
+    for (const hit of hits ?? []) {
+      findings.push({
+        rule: pattern.rule,
+        description: pattern.description,
+        severity: pattern.severity,
+        file: relativePath,
+        line: hit.line,
+        match: truncateMatch(hit.text),
+        recommendation: getRecommendation(pattern.rule),
+      });
     }
   }
 
   // Multi-line protestware check: locale/timezone on one line, destructive on nearby lines
-  checkMultiLineProtestware(content, relativePath, findings);
+  checkMultiLineProtestware(content, relativePath, findings, trustedOwnFile);
 }
 
 /**
@@ -753,58 +1321,350 @@ function checkMultiLineProtestware(
   content: string,
   relativePath: string,
   findings: Finding[],
+  trustedOwnFile: boolean,
 ): void {
-  // Skip scanner source and test files (contain protestware patterns as definitions)
-  const normPath = relativePath.replace(/\\/g, "/");
-  if (SCANNER_SOURCE_FILE.test(normPath) || TEST_FILE_REGEX.test(normPath)) return;
+  // Only an exact, content-verified own definition/fixture may skip this
+  // correlation. Basenames and repository metadata never qualify.
+  if (trustedOwnFile) return;
 
-  const lines = content.split("\n");
   const PROXIMITY = 15;
+  const PROXIMITY_CHARS = 512;
+  const alreadyFound = findings.some(
+    (finding) =>
+      finding.rule === "PROTESTWARE_LOCALE_DESTRUCT" &&
+      finding.file === relativePath,
+  );
+  if (alreadyFound) return;
 
-  const localePattern =
-    /(?:locale|timezone|timeZone|Intl\.DateTimeFormat|getTimezone|country_code|country_name)/i;
-  const destructivePattern =
-    /(?:fs\.(?:rmSync|unlinkSync|rmdirSync|rmdir|unlink|rm)\s*\(|rimraf\s*\(|process\.exit\s*\(|execSync\s*\(["'`](?:rm|del|format|dd\s))/i;
+  // Comments and regex literals cannot provide either side of the correlation.
+  // Keep string values visible for geo comparisons and destructive shell calls;
+  // a second same-length view blanks them only while matching block structure.
+  const searchableContent = maskMixedCommentsPreservingStrings(content);
+  const structureCharacters = searchableContent.split("");
+  let quote: "'" | '"' | "`" | undefined;
+  for (let index = 0; index < structureCharacters.length; index++) {
+    const character = structureCharacters[index]!;
+    if (quote === undefined) {
+      if (character === "'" || character === '"' || character === "`") {
+        quote = character;
+        structureCharacters[index] = " ";
+      }
+      continue;
+    }
 
-  const localeLines: number[] = [];
-  const destructiveLines: number[] = [];
+    if (character === "\\") {
+      structureCharacters[index] = " ";
+      if (
+        index + 1 < structureCharacters.length &&
+        structureCharacters[index + 1] !== "\n" &&
+        structureCharacters[index + 1] !== "\r"
+      ) {
+        structureCharacters[++index] = " ";
+      }
+      continue;
+    }
+    if (character === quote) {
+      structureCharacters[index] = " ";
+      quote = undefined;
+      continue;
+    }
+    if (character === "\n" || character === "\r") {
+      if (quote !== "`") quote = undefined;
+    } else {
+      structureCharacters[index] = " ";
+    }
+  }
+  const structureContent = structureCharacters.join("");
+  const lines = content.split("\n");
+  const structureLines = structureContent.split("\n");
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i] ?? "";
-    if (localePattern.test(line)) localeLines.push(i);
-    if (destructivePattern.test(line)) destructiveLines.push(i);
+  const lineStarts = [0];
+  for (let index = 0; index < content.length; index++) {
+    if (content[index] === "\n") lineStarts.push(index + 1);
+  }
+  const lineAt = (offset: number): number => {
+    let low = 0;
+    let high = lineStarts.length;
+    while (low + 1 < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (lineStarts[middle]! <= offset) low = middle;
+      else high = middle;
+    }
+    return low;
+  };
+
+  // Precompute delimiter ownership once. Re-scanning from every nested control
+  // header makes deeply nested/minified files quadratic.
+  const parenClosings = new Map<number, number>();
+  const braceClosings = new Map<number, number>();
+  const parenStack: number[] = [];
+  const braceStack: number[] = [];
+  for (let index = 0; index < structureContent.length; index++) {
+    const character = structureContent[index];
+    if (character === "(") parenStack.push(index);
+    else if (character === ")") {
+      const open = parenStack.pop();
+      if (open !== undefined) parenClosings.set(open, index);
+    } else if (character === "{") braceStack.push(index);
+    else if (character === "}") {
+      const open = braceStack.pop();
+      if (open !== undefined) braceClosings.set(open, index);
+    }
   }
 
-  // Check if any locale line is within PROXIMITY of a destructive line
-  for (const localeLine of localeLines) {
-    for (const destructiveLine of destructiveLines) {
-      if (
-        Math.abs(localeLine - destructiveLine) <= PROXIMITY &&
-        localeLine !== destructiveLine
-      ) {
-        // Avoid duplicating if we already found a single-line match
-        const alreadyFound = findings.some(
-          (f) =>
-            f.rule === "PROTESTWARE_LOCALE_DESTRUCT" &&
-            f.file === relativePath,
-        );
-        if (!alreadyFound) {
-          findings.push({
-            rule: "PROTESTWARE_PROXIMITY",
-            description: `Locale/timezone check (line ${localeLine + 1}) found near destructive code (line ${destructiveLine + 1}). This proximity pattern is common in protestware.`,
-            severity: "high",
-            file: relativePath,
-            line: localeLine + 1,
-            match: truncateMatch(
-              `locale: "${(lines[localeLine] ?? "").trim()}" ... destruct: "${(lines[destructiveLine] ?? "").trim()}"`,
-            ),
-            recommendation:
-              "Review the surrounding code. Protestware uses locale/geo checks to selectively destroy data or crash for targeted users.",
-          });
+  const localePattern =
+    /(?:\blocale\b|\btimezone\b|\btimeZone\b|Intl\.DateTimeFormat|\bgetTimezone\b|\bcountry(?:Code|_code|_name)?\b)/i;
+  const localeIdentifierPattern =
+    /\b(?:locale|timezone|timeZone|tz|getTimezone|country|countryCode|country_code|country_name|region)\b/g;
+  const assignmentPattern =
+    /(?<![.\w$])([A-Za-z_$][\w$]*)\s*=(?!=|>)/;
+
+  interface LocaleBinding {
+    availableOffset: number;
+    sourceLine?: number;
+    evidenceOffset?: number;
+  }
+  const localeBindings = new Map<string, LocaleBinding[]>();
+  const noteLocaleBinding = (
+    name: string,
+    availableOffset: number,
+    sourceLine: number | undefined,
+    evidenceOffset: number | undefined,
+  ): void => {
+    const bindings = localeBindings.get(name) ?? [];
+    if (bindings.at(-1)?.availableOffset === availableOffset) {
+      bindings[bindings.length - 1] = { availableOffset, sourceLine, evidenceOffset };
+    } else {
+      bindings.push({ availableOffset, sourceLine, evidenceOffset });
+    }
+    localeBindings.set(name, bindings);
+  };
+  const derivedIdentifiers = new Map<
+    string,
+    { sourceLine: number; evidenceOffset: number }
+  >();
+  for (let line = 0; line < structureLines.length; line++) {
+    const lineSource = structureLines[line] ?? "";
+    let segmentStart = 0;
+    while (segmentStart <= lineSource.length) {
+      const semicolon = lineSource.indexOf(";", segmentStart);
+      const segmentEnd = semicolon === -1 ? lineSource.length : semicolon + 1;
+      const source = lineSource.slice(segmentStart, segmentEnd);
+      const availableOffset = lineStarts[line]! + segmentEnd;
+      const assignment = assignmentPattern.exec(source);
+      const assignmentName = assignment?.[1];
+      const identifiers = new Set<string>();
+      localeIdentifierPattern.lastIndex = 0;
+      let identifier: RegExpExecArray | null;
+      while ((identifier = localeIdentifierPattern.exec(source)) !== null) {
+        identifiers.add(identifier[0]);
+      }
+
+      const localeEvidence = localePattern.exec(source);
+      if (localeEvidence) {
+        if (assignmentName) identifiers.add(assignmentName);
+        const evidenceOffset =
+          lineStarts[line]! + segmentStart + localeEvidence.index + localeEvidence[0].length;
+        for (const name of identifiers) {
+          derivedIdentifiers.set(name, { sourceLine: line, evidenceOffset });
+          noteLocaleBinding(name, availableOffset, line, evidenceOffset);
         }
-        return; // One finding per file is enough
+      } else if (assignmentName) {
+        const rhs = source.slice((assignment?.index ?? 0) + assignment![0].length);
+        const sourceTokens = new Set(
+          rhs.match(/[A-Za-z_$][\w$]*/g) ?? [],
+        );
+        let derivedSource:
+          | { sourceLine: number; evidenceOffset: number }
+          | undefined;
+        for (const token of sourceTokens) {
+          const candidate = derivedIdentifiers.get(token);
+          if (
+            candidate &&
+            line - candidate.sourceLine <= PROXIMITY &&
+            availableOffset - candidate.evidenceOffset <= PROXIMITY_CHARS &&
+            (!derivedSource || candidate.evidenceOffset > derivedSource.evidenceOffset)
+          ) {
+            derivedSource = candidate;
+          }
+        }
+        if (!derivedSource) {
+          derivedIdentifiers.delete(assignmentName);
+          noteLocaleBinding(assignmentName, availableOffset, undefined, undefined);
+        } else {
+          const nextSource = {
+            sourceLine: derivedSource.sourceLine,
+            evidenceOffset: availableOffset,
+          };
+          derivedIdentifiers.set(assignmentName, nextSource);
+          noteLocaleBinding(
+            assignmentName,
+            availableOffset,
+            nextSource.sourceLine,
+            nextSource.evidenceOffset,
+          );
+        }
+      }
+
+      if (semicolon === -1) break;
+      segmentStart = segmentEnd;
+    }
+  }
+
+  interface GeoGate {
+    sourceLine: number;
+    sourceOffset: number;
+    bodyStart: number;
+    bodyEnd: number;
+  }
+  const geoGates: GeoGate[] = [];
+  const localeBindingAt = (
+    name: string,
+    gateOffset: number,
+  ): LocaleBinding | undefined => {
+    const bindings = localeBindings.get(name);
+    if (!bindings || bindings.length === 0) return undefined;
+    let low = 0;
+    let high = bindings.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (bindings[middle]!.availableOffset <= gateOffset) low = middle + 1;
+      else high = middle;
+    }
+    return low === 0 ? undefined : bindings[low - 1];
+  };
+  const controlPattern = /\b(if|switch|while)\s*\(/g;
+  let control: RegExpExecArray | null;
+  while ((control = controlPattern.exec(structureContent)) !== null) {
+    const open = control.index + control[0].lastIndexOf("(");
+    const close = parenClosings.get(open);
+    if (close === undefined) break;
+    controlPattern.lastIndex = close + 1;
+
+    const gateLine = lineAt(control.index);
+    const conditionStructure = structureContent.slice(open + 1, close);
+    const discriminatesByValue =
+      control[1] === "switch" ||
+      /(?:===?|!==?|\.\s*(?:includes|has|test|match|startsWith|endsWith)\s*\(|\bin\b)/.test(
+        conditionStructure,
+      );
+    if (!discriminatesByValue) continue;
+
+    const conditionIdentifiers = new Set(
+      conditionStructure.match(/[A-Za-z_$][\w$]*/g) ?? [],
+    );
+    let localeSourceLine: number | undefined;
+    let localeSourceOffset: number | undefined;
+    for (const name of conditionIdentifiers) {
+      const binding = localeBindingAt(name, control.index);
+      if (
+        binding?.sourceLine !== undefined &&
+        binding.evidenceOffset !== undefined &&
+        gateLine - binding.sourceLine <= PROXIMITY &&
+        control.index - binding.evidenceOffset <= PROXIMITY_CHARS &&
+        (localeSourceOffset === undefined || binding.evidenceOffset > localeSourceOffset)
+      ) {
+        localeSourceLine = binding.sourceLine;
+        localeSourceOffset = binding.evidenceOffset;
       }
     }
+    const directLocaleEvidence = localePattern.exec(conditionStructure);
+    if (localeSourceLine === undefined && directLocaleEvidence) {
+      localeSourceLine = gateLine;
+      localeSourceOffset =
+        open + 1 + directLocaleEvidence.index + directLocaleEvidence[0].length;
+    }
+    if (localeSourceLine === undefined || localeSourceOffset === undefined) continue;
+
+    let bodyStart = close + 1;
+    while (bodyStart < structureContent.length && /\s/.test(structureContent[bodyStart]!)) {
+      bodyStart++;
+    }
+    let bodyEnd: number;
+    if (structureContent[bodyStart] === "{") {
+      const closeBrace = braceClosings.get(bodyStart);
+      if (closeBrace === undefined) continue;
+      bodyStart++;
+      bodyEnd = closeBrace;
+    } else {
+      const semicolon = structureContent.indexOf(";", bodyStart);
+      const newline = structureContent.indexOf("\n", bodyStart);
+      const candidates = [semicolon === -1 ? undefined : semicolon + 1, newline]
+        .filter((value): value is number => value !== undefined && value !== -1);
+      bodyEnd = candidates.length > 0
+        ? Math.min(...candidates)
+        : structureContent.length;
+    }
+    geoGates.push({
+      sourceLine: localeSourceLine,
+      sourceOffset: localeSourceOffset,
+      bodyStart,
+      bodyEnd,
+    });
+  }
+
+  const destructivePattern =
+    /(?:\bfs\s*\.\s*(?:rmSync|rm|unlinkSync|unlink|rmdirSync|rmdir|truncateSync|truncate|ftruncateSync|ftruncate)\s*\(|\brimraf\s*\(|\bprocess\s*\.\s*exit\s*\(|\bexecSync\s*\(\s*["'`](?:rm|del|format|dd\s))/gi;
+  interface ActiveGeoGate {
+    gate: GeoGate;
+    bestSourceGate: GeoGate;
+  }
+  const activeGates: ActiveGeoGate[] = [];
+  let nextGateIndex = 0;
+  let destructive: RegExpExecArray | null;
+  while ((destructive = destructivePattern.exec(searchableContent)) !== null) {
+    // The lexical structure view blanks string contents. A signal beginning on
+    // a blanked character is documentation/data, not an executable call.
+    if (!/[A-Za-z_$]/.test(structureContent[destructive.index] ?? "")) continue;
+    const destructiveStart = destructive.index;
+    const destructiveLine = lineAt(destructiveStart);
+
+    while (
+      nextGateIndex < geoGates.length &&
+      geoGates[nextGateIndex]!.bodyStart <= destructiveStart
+    ) {
+      const gate = geoGates[nextGateIndex++]!;
+      while (
+        activeGates.length > 0 &&
+        activeGates.at(-1)!.gate.bodyEnd <= gate.bodyStart
+      ) {
+        activeGates.pop();
+      }
+      const previousBest = activeGates.at(-1)?.bestSourceGate;
+      activeGates.push({
+        gate,
+        bestSourceGate:
+          !previousBest || gate.sourceOffset >= previousBest.sourceOffset
+            ? gate
+            : previousBest,
+      });
+    }
+    while (
+      activeGates.length > 0 &&
+      activeGates.at(-1)!.gate.bodyEnd <= destructiveStart
+    ) {
+      activeGates.pop();
+    }
+    const gate = activeGates.at(-1)?.bestSourceGate;
+    if (
+      !gate ||
+      destructiveLine - gate.sourceLine > PROXIMITY ||
+      destructiveStart - gate.sourceOffset > PROXIMITY_CHARS
+    ) continue;
+
+    findings.push({
+      rule: "PROTESTWARE_PROXIMITY",
+      description: `Locale/timezone gate (line ${gate.sourceLine + 1}) controls destructive code (line ${destructiveLine + 1}). This conditional pattern is common in protestware.`,
+      severity: "high",
+      file: relativePath,
+      line: gate.sourceLine + 1,
+      match: truncateMatch(
+        `locale: "${(lines[gate.sourceLine] ?? "").trim()}" ... destruct: "${(lines[destructiveLine] ?? "").trim()}"`,
+      ),
+      recommendation:
+        "Review the surrounding code. Protestware uses locale/geo checks to selectively destroy data or crash for targeted users.",
+    });
+    return;
   }
 }
 
@@ -816,12 +1676,8 @@ function checkKnownBadVersions(
   relativePath: string,
   findings: Finding[],
 ): void {
-  let pkg: Record<string, unknown>;
-  try {
-    pkg = JSON.parse(content) as Record<string, unknown>;
-  } catch {
-    return;
-  }
+  const pkg = parseJsonObject(content);
+  if (!pkg) return;
 
   const allDeps = {
     ...(pkg.dependencies as Record<string, string> | undefined),
@@ -842,17 +1698,33 @@ function checkKnownBadVersions(
 /**
  * Check package-lock.json for known-bad resolved versions (v4.1).
  */
+/**
+ * Match every RESOLVED lockfile version against both curated sources (T-016).
+ *
+ * KNOWN_BAD_NPM_VERSIONS was already checked here, so the scan path has always
+ * done exact name@version matching. It simply never consulted the threat feed,
+ * where the great majority of package IOCs are version-pinned - so those entries
+ * were reachable through `guard` and not through `scan`, the more visible surface.
+ *
+ * The lockfile is the only correct source. A package.json dependency value is a
+ * RANGE, not a version, and the callers that pass `undefined` to matchBareNpmIOC
+ * do so because they genuinely have no version in hand; they are not defects to
+ * be "fixed" by forcing version-awareness where the data does not exist.
+ *
+ * False-positive surface, measured before this shipped rather than asserted:
+ * every pinned npm IOC in the feed matched against 10,615 resolved dependencies
+ * across 43 repositories produced ZERO hits. It is exact equality, so the only
+ * way it fires wrongly is a wrong pin in the feed, which is a data-quality
+ * question already governed by the bare-name audit discipline.
+ */
 function checkLockfileBadVersions(
   content: string,
   relativePath: string,
   findings: Finding[],
+  feed: FeedIOC[],
 ): void {
-  let lock: Record<string, unknown>;
-  try {
-    lock = JSON.parse(content) as Record<string, unknown>;
-  } catch {
-    return;
-  }
+  const lock = parseJsonObject(content);
+  if (!lock) return;
 
   // lockfile v2+ uses "packages" key
   const packages = lock.packages as Record<string, { version?: string }> | undefined;
@@ -865,7 +1737,9 @@ function checkLockfileBadVersions(
       const finding = checkBadVersion(name, entry.version, "npm");
       if (finding) {
         findings.push({ ...finding, file: relativePath });
+        continue; // one finding per dependency; the blocklist is the more specific source
       }
+      pushPinnedFeedFinding(name, entry.version, relativePath, findings, feed);
     }
   }
 
@@ -877,9 +1751,45 @@ function checkLockfileBadVersions(
       const finding = checkBadVersion(name, entry.version, "npm");
       if (finding) {
         findings.push({ ...finding, file: relativePath });
+        continue;
       }
+      pushPinnedFeedFinding(name, entry.version, relativePath, findings, feed);
     }
   }
+}
+
+/**
+ * One feed finding for a resolved lockfile dependency, or nothing.
+ *
+ * Bare-name feed entries are deliberately NOT reported from here. They already
+ * fire through checkMaliciousDependencyNames on the package.json path, and a
+ * lockfile lists every transitive dependency, so emitting them again would
+ * double-report each one and multiply it across the tree.
+ */
+function pushPinnedFeedFinding(
+  name: string,
+  version: string,
+  relativePath: string,
+  findings: Finding[],
+  feed: FeedIOC[],
+): void {
+  const ioc = matchBareNpmIOC(name, version, feed);
+  if (!ioc) return;
+  // A bare-name entry matches ANY version, so it would have hit regardless of
+  // the lockfile. Only an entry pinned to this exact version is new information.
+  if (ioc.value.lastIndexOf("@") <= 0) return;
+
+  const attrib = ioc.campaign ? ` (campaign: ${ioc.campaign})` : "";
+  findings.push({
+    rule: "LOCKFILE_MALICIOUS_VERSION",
+    description: `Lockfile resolves "${name}" to ${version}, a version listed in the threat feed as malicious${attrib}.`,
+    severity: "critical",
+    confidence: ioc.confidence ?? 0.95,
+    category: "supply-chain",
+    file: relativePath,
+    match: `${name}@${version}`,
+    recommendation: `Remove ${name}@${version}. Update the lockfile to a clean version and rotate any credentials the install may have had access to.`,
+  });
 }
 
 /**
@@ -890,26 +1800,24 @@ function checkBuildToolPatterns(
   relativePath: string,
   findings: Finding[],
 ): void {
-  const lines = content.split("\n");
-
   for (const pattern of BUILD_TOOL_PATTERNS) {
-    const regex = new RegExp(pattern.pattern, "gi");
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i] ?? "";
-      const match = regex.exec(line);
-      if (match) {
-        findings.push({
-          rule: pattern.rule,
-          description: pattern.description,
-          severity: pattern.severity,
-          file: relativePath,
-          line: i + 1,
-          match: truncateMatch(match[0]),
-          recommendation: getRecommendation(pattern.rule),
-        });
-        regex.lastIndex = 0;
-      }
+    const hits = matchPatternInFile(
+      pattern,
+      content,
+      relativePath,
+      findings,
+      "gi",
+    );
+    for (const hit of hits ?? []) {
+      findings.push({
+        rule: pattern.rule,
+        description: pattern.description,
+        severity: pattern.severity,
+        file: relativePath,
+        line: hit.line,
+        match: truncateMatch(hit.text),
+        recommendation: getRecommendation(pattern.rule),
+      });
     }
   }
 }
@@ -917,41 +1825,98 @@ function checkBuildToolPatterns(
 /**
  * Check root package.json for monorepo/workspace risks (v4.0).
  */
+/**
+ * Flag dependency names in a package.json that are EXACT known-malicious
+ * packages in the threat feed (matchBareNpmIOC: bare-name = any version).
+ * Runs on a directory scan so a victim scanning their own repo learns they
+ * depend on a flagged package (previously only the `npm <pkg>` path checked).
+ *
+ * Matches the feed's exact IOC names, NOT the broad MALICIOUS_PACKAGE_PATTERNS
+ * heuristics (those flag "any unknown-scope package" and would false-positive
+ * on legitimate deps like @vitest/coverage-v8 - caught during v5.10.1 review).
+ */
+function checkMaliciousDependencyNames(
+  content: string,
+  file: string,
+  findings: Finding[],
+  feed: FeedIOC[],
+): void {
+  const parsed = parseJsonObject(content);
+  if (!parsed) return;
+  const pkg = parsed as {
+    dependencies?: Record<string, string>;
+    devDependencies?: Record<string, string>;
+    optionalDependencies?: Record<string, string>;
+    peerDependencies?: Record<string, string>;
+  };
+  // Collect the package that is actually INSTALLED for each entry, not the key.
+  // An npm alias ("utils": "npm:chalk-tempalte@1.0.0") installs the target while
+  // the key is arbitrary attacker-chosen text, so keying off Object.keys() alone
+  // let a known-malicious package scan completely clean.
+  const candidates = new Map<string, { name: string; version?: string; alias?: string }>();
+  for (const group of [
+    pkg.dependencies,
+    pkg.devDependencies,
+    pkg.optionalDependencies,
+    pkg.peerDependencies,
+  ]) {
+    for (const [key, spec] of Object.entries(group ?? {})) {
+      const alias = resolveNpmAlias(spec);
+      const candidate = alias
+        ? { name: alias.name, version: alias.version, alias: key }
+        : { name: key, version: undefined as string | undefined };
+      candidates.set(`${candidate.name}@${candidate.version ?? ""}`, candidate);
+    }
+  }
+
+  for (const { name, version, alias } of candidates.values()) {
+    const ioc = matchBareNpmIOC(name, version, feed);
+    if (ioc) {
+      const attrib = ioc.campaign ? ` (campaign: ${ioc.campaign})` : "";
+      const via = alias ? ` (installed via the npm alias "${alias}")` : "";
+      findings.push({
+        rule: "MALICIOUS_DEPENDENCY",
+        description: `Dependency "${name}" is a known-malicious package in the threat feed${attrib}${via}`,
+        severity: "critical",
+        confidence: ioc.confidence ?? 0.95,
+        category: "supply-chain",
+        file,
+        match: alias ?? name,
+        recommendation: `Remove "${alias ?? name}" immediately and rotate any secrets exposed while it was installed.`,
+      });
+    }
+  }
+}
+
 function checkMonorepoPatterns(
   content: string,
   relativePath: string,
   findings: Finding[],
 ): void {
-  let pkg: Record<string, unknown>;
-  try {
-    pkg = JSON.parse(content) as Record<string, unknown>;
-  } catch {
-    return;
-  }
+  const pkg = parseJsonObject(content);
+  if (!pkg) return;
 
   // Only check if it has workspaces
   if (!pkg.workspaces) return;
 
-  const lines = content.split("\n");
-
   for (const pattern of MONOREPO_PATTERNS) {
-    const regex = new RegExp(pattern.pattern, "gi");
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i] ?? "";
-      const match = regex.exec(line);
-      if (match) {
-        findings.push({
-          rule: pattern.rule,
-          description: pattern.description,
-          severity: pattern.severity,
-          file: relativePath,
-          line: i + 1,
-          match: truncateMatch(match[0]),
-          recommendation: getRecommendation(pattern.rule),
-        });
-        regex.lastIndex = 0;
-      }
+    const hits = matchPatternInFile(
+      pattern,
+      content,
+      relativePath,
+      findings,
+      "gi",
+    );
+    for (const hit of hits ?? []) {
+      findings.push({
+        rule: pattern.rule,
+        description: pattern.description,
+        severity: pattern.severity,
+        file: relativePath,
+        line: hit.line,
+        match: truncateMatch(hit.text),
+        recommendation: getRecommendation(pattern.rule),
+      });
     }
   }
 }
@@ -1009,19 +1974,23 @@ function calculateSummary(
  * Each unique rule contributes at most once (its highest severity instance),
  * preventing repeated instances of the same moderate rule from dominating the score.
  */
-// Meta/governance findings that fire because other findings exist — excluded from
+// Meta/governance findings that fire because other findings exist - excluded from
 // score to prevent circular inflation (they don't represent independent risk signals).
-const SCORE_EXCLUDED_RULES = new Set([
+export const SCORE_EXCLUDED_RULES: ReadonlySet<string> = new Set([
   "CRITICAL_FINDING_NO_OWNER",
   "RISK_STAGNATION_HIGH",
 ]);
 
 function calculateScore(findings: Finding[]): number {
-  // Deduplicate by rule — take the highest-severity instance per rule.
-  // Skip meta-governance findings that would circularly inflate the score.
+  // Deduplicate by rule - take the highest-severity instance per rule.
+  // Skip informational observations and meta-governance findings that would
+  // circularly inflate the score. Info remains visible in the report but does
+  // not represent detected risk.
   const maxByRule = new Map<string, Severity>();
   for (const finding of findings) {
-    if (SCORE_EXCLUDED_RULES.has(finding.rule)) continue;
+    if (finding.severity === "info" || SCORE_EXCLUDED_RULES.has(finding.rule)) {
+      continue;
+    }
     const current = maxByRule.get(finding.rule);
     if (!current || SEVERITY_SCORES[finding.severity] > SEVERITY_SCORES[current]) {
       maxByRule.set(finding.rule, finding.severity);
@@ -1048,7 +2017,10 @@ function getRiskLevel(score: number): ScanReport["riskLevel"] {
 /**
  * Generate human-readable recommendations.
  */
-function generateRecommendations(findings: Finding[]): string[] {
+function generateRecommendations(
+  findings: Finding[],
+  partialScan = false,
+): string[] {
   const recommendations: string[] = [];
   const rules = new Set(findings.map((f) => f.rule));
 
@@ -1065,6 +2037,11 @@ function generateRecommendations(findings: Finding[]): string[] {
   if (rules.has("INVISIBLE_UNICODE")) {
     recommendations.push(
       "Review files with invisible Unicode characters. These can hide malicious code in otherwise normal-looking files.",
+    );
+  }
+  if (rules.has("FILE_TOO_LARGE_SKIPPED")) {
+    recommendations.push(
+      "One or more files exceeded the 5 MB scan limit and were NOT content-scanned. Inspect them manually - oversized files can be used to smuggle payloads past size-limited scanners.",
     );
   }
   if (rules.has("SOLANA_MAINNET") || rules.has("HELIUS_RPC")) {
@@ -1116,6 +2093,16 @@ function generateRecommendations(findings: Finding[]): string[] {
   if (rules.has("COA_RC_SDD_DLL") || rules.has("COA_RC_POSTINSTALL")) {
     recommendations.push(
       "CRITICAL: coa/rc npm hijack indicators detected. Check for sdd.dll references and encoded postinstall payloads. Pin dependency versions.",
+    );
+  }
+  if (rules.has("DPRK_VALIDATE_SDK")) {
+    recommendations.push(
+      "CRITICAL: DPRK @validate-sdk/v2 indicator detected. April 2026 campaign delivered AI-inserted malicious npm dependencies. Remove the package and audit all AI-suggested dependencies.",
+    );
+  }
+  if (rules.has("LOFYSTEALER_MARKER") || rules.has("LOFYGANG_MINECRAFT_LURE")) {
+    recommendations.push(
+      "CRITICAL: LofyGang / LofyStealer (GrabBot) indicators detected. April 2026 campaign targets Minecraft players via fake hack tools. Do not run any associated binaries.",
     );
   }
 
@@ -1217,7 +2204,14 @@ function generateRecommendations(findings: Finding[]): string[] {
       "CRITICAL: Dockerfile pipes remote content to shell. Download, verify checksum, then execute.",
     );
   }
-  if (rules.has("DOCKER_UNPINNED_BASE") || rules.has("DOCKER_NO_TAG")) {
+  // All three base-image verdicts share one remediation, so all three must
+  // reach it. DOCKER_TAG_NOT_DIGEST was the tier that could otherwise be the
+  // only finding in a report and leave that report with no recommendation.
+  if (
+    rules.has("DOCKER_UNPINNED_BASE") ||
+    rules.has("DOCKER_NO_TAG") ||
+    rules.has("DOCKER_TAG_NOT_DIGEST")
+  ) {
     recommendations.push(
       "Pin Docker base images by digest (FROM image@sha256:...) to ensure reproducible and tamper-proof builds.",
     );
@@ -1287,6 +2281,26 @@ function generateRecommendations(findings: Finding[]): string[] {
     );
   }
 
+  // RubyGems/Composer/NuGet recommendations
+  if (
+    rules.has("RUBY_MALICIOUS_GEM") ||
+    rules.has("COMPOSER_MALICIOUS_PACKAGE") ||
+    rules.has("NUGET_MALICIOUS_PACKAGE")
+  ) {
+    recommendations.push(
+      "CRITICAL: Dependencies match threat-intelligence package IOCs. Remove them immediately, rotate credentials exposed to installs, and audit affected systems.",
+    );
+  }
+  if (
+    rules.has("RUBY_GEM_HTTP_SOURCE") ||
+    rules.has("COMPOSER_HTTP_REPOSITORY") ||
+    rules.has("NUGET_HTTP_FEED")
+  ) {
+    recommendations.push(
+      "Package sources served over plain http detected. Switch all registries/feeds to https to prevent in-transit tampering.",
+    );
+  }
+
   // Infostealer / dead-drop recommendations (v4.1)
   if (rules.has("DEAD_DROP_STEAM") || rules.has("DEAD_DROP_TELEGRAM") || rules.has("DEAD_DROP_PASTEBIN")) {
     recommendations.push(
@@ -1305,12 +2319,17 @@ function generateRecommendations(findings: Finding[]): string[] {
   }
   if (rules.has("DROPPER_TEMP_EXEC")) {
     recommendations.push(
-      "CRITICAL: Dropper/loader behavior detected — writing and executing files in temporary directories.",
+      "CRITICAL: Dropper/loader behavior detected - writing and executing files in temporary directories.",
     );
   }
 
   // IOC blocklist recommendations (v4.1)
-  if (rules.has("IOC_KNOWN_C2_DOMAIN") || rules.has("IOC_KNOWN_C2_IP") || rules.has("IOC_KNOWN_DEAD_DROP")) {
+  if (
+    rules.has("IOC_KNOWN_C2_DOMAIN") ||
+    rules.has("IOC_KNOWN_C2_IP") ||
+    rules.has("IOC_KNOWN_DEAD_DROP") ||
+    rules.has("IOC_KNOWN_C2_WALLET")
+  ) {
     recommendations.push(
       "CRITICAL: Known malicious infrastructure (C2/dead-drop) detected in code. This is a confirmed threat indicator.",
     );
@@ -1329,7 +2348,7 @@ function generateRecommendations(findings: Finding[]): string[] {
   }
   if (rules.has("README_LURE_CRACK") || rules.has("RELEASE_NAME_LURE")) {
     recommendations.push(
-      "This repository uses piracy/crack language — a strong indicator of malware distribution. Do not download or use.",
+      "This repository uses piracy/crack language - a strong indicator of malware distribution. Do not download or use.",
     );
   }
 
@@ -1345,12 +2364,17 @@ function generateRecommendations(findings: Finding[]): string[] {
     );
   }
 
+  if (partialScan) {
+    recommendations.unshift(
+      "WARNING: Scan incomplete because one or more configured checks or files could not be evaluated. Resolve coverage gaps before treating this result as clean.",
+    );
+  }
   if (recommendations.length === 0 && findings.length > 0) {
     recommendations.push(
       "Review the listed findings and assess whether they represent legitimate functionality or potential threats.",
     );
   }
-  if (findings.length === 0) {
+  if (findings.length === 0 && !partialScan) {
     recommendations.push("No malicious indicators detected. The scanned code appears clean.");
   }
 
@@ -1540,6 +2564,8 @@ function getRecommendation(rule: string): string {
       "Known malicious C2 IP address. Quarantine immediately.",
     IOC_KNOWN_DEAD_DROP:
       "Known dead-drop resolver URL. This is used to retrieve malware C2 addresses.",
+    IOC_KNOWN_C2_WALLET:
+      "Known C2 blockchain address. Treat referencing code as malicious.",
     IOC_KNOWN_MALWARE_HASH:
       "This hash matches known malware. Do not execute associated files.",
     IOC_KNOWN_MALICIOUS_ACCOUNT:
@@ -1573,10 +2599,4 @@ function getRecommendation(rule: string): string {
   return map[rule] ?? "Review this finding manually and assess the risk.";
 }
 
-/**
- * Truncate a match string for display.
- */
-function truncateMatch(match: string, maxLen = 120): string {
-  if (match.length <= maxLen) return match;
-  return match.substring(0, maxLen) + "...";
-}
+// truncateMatch is imported from patterns.ts (shared with the multi-line engine).

@@ -70,4 +70,36 @@ describe("Risk Engine", () => {
     ]);
     expect(dims.confidence).toBe(0.5);
   });
+
+  it("counts AGENTIC_WF_ findings toward the ciCd risk dimension (v5.10)", () => {
+    const withRule = calculateRiskDimensions([makeFinding("AGENTIC_WF_PUBLIC_POST_TOOL", "high")]);
+    const withoutRule = calculateRiskDimensions([]);
+    expect(withRule.ciCdRisk).toBeGreaterThan(withoutRule.ciCdRisk);
+  });
+
+  it("counts previously-uncounted SKILL_ and MCP_ findings toward the ciCd dimension (v5.10)", () => {
+    expect(calculateRiskDimensions([makeFinding("SKILL_INVISIBLE_UNICODE", "critical")]).ciCdRisk)
+      .toBeGreaterThan(0);
+    expect(calculateRiskDimensions([makeFinding("MCP_TOOL_POISONING", "high")]).ciCdRisk)
+      .toBeGreaterThan(0);
+  });
+
+  it("counts workflow-model and SLSA findings toward CI/CD risk", () => {
+    expect(
+      calculateRiskDimensions([
+        makeFinding("WORKFLOW_SECRET_TO_UPLOAD_PATH", "medium"),
+      ]).ciCdRisk,
+    ).toBeGreaterThan(0);
+    expect(
+      calculateRiskDimensions([makeFinding("SLSA_NO_PROVENANCE", "medium")]).ciCdRisk,
+    ).toBeGreaterThan(0);
+  });
+
+  it("does not round a non-zero weighted risk down to zero", () => {
+    const dims = calculateRiskDimensions([
+      { rule: "GHA_TAG_NOT_SHA", description: "test", severity: "low", recommendation: "test" },
+    ]);
+    expect(dims.ciCdRisk).toBe(1);
+    expect(dims.overallScore).toBe(1);
+  });
 });

@@ -1,0 +1,36 @@
+# Minimal supply-chain-guard workflow using the published GitHub Action.
+# Copy to .github/workflows/supply-chain-guard.yml in your repository.
+#
+# Inputs mirror action.yml - see the README "GitHub Action" section for
+# the full list (path, format, min-severity, exclude-rules, fail-on,
+# comment-on-pr).
+
+name: Supply Chain Guard
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  # Required so the Action can post/update the scan report comment on PRs.
+  pull-requests: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned to an exact release on purpose: a security scanner should be a
+      # deterministic input, so you know which detection logic and IOC feed ran.
+      # `@v6` also works (a floating branch, fast-forwarded on each release), but
+      # it goes silently stale once the v6 line stops shipping. Dependabot keeps
+      # this line current; see the README for the config.
+      - uses: homeofe/supply-chain-guard@v6.0.7
+        with:
+          # Fail the check on high or critical findings.
+          fail-on: high
+          # Post the report as a PR comment (updated in place on re-runs).
+          comment-on-pr: true

@@ -1,7 +1,8 @@
 {
   "name": "supply-chain-guard",
-  "version": "5.2.0",
-  "description": "Open-source supply-chain security scanner for npm, PyPI, Cargo, Go, Docker, VS Code extensions, GitHub Actions, IaC and Solana C2. Detects GlassWorm, Shai-Hulud, PPE attacks, dependency confusion and 120+ malware indicators. Generates CycloneDX 1.6 SBOMs and verifies SLSA provenance.",
+  "version": "6.0.7",
+  "mcpName": "io.github.homeofe/supply-chain-guard",
+  "description": "Open-source supply-chain security scanner for npm, PyPI, Cargo, Go, RubyGems, Composer, NuGet, Docker, VS Code extensions, GitHub Actions, IaC and Solana C2. Detects GlassWorm, Shai-Hulud, PPE attacks, dependency confusion and 350+ threat indicators across all major lockfile formats (npm, pnpm, yarn, bun). Generates CycloneDX 1.6 SBOMs, grades SLSA provenance (in-toto/DSSE structural validation), and correlates findings into attack-chain incidents.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
@@ -10,9 +11,22 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
-    "prepublishOnly": "npm run build"
+    "check:aahp": "node scripts/check-aahp-pin.mjs && node scripts/check-em-dash-scope.mjs && npx --no-install aahp check .",
+    "check:handoff": "node scripts/scg-handoff-docs.mjs --check",
+    "check:self-scan": "node scripts/generate-self-scan-manifest.mjs --check",
+    "self-scan:generate": "node scripts/generate-self-scan-manifest.mjs",
+    "check:release-ancestry": "node scripts/check-release-ancestry.mjs",
+    "handoff:refresh": "node scripts/scg-handoff-docs.mjs",
+    "feed:generate": "node scripts/generate-feed.mjs",
+    "audit:blocklist": "node scripts/audit-blocklist.mjs",
+    "feed:import": "node scripts/import-threat-feed.mjs",
+    "check:feed": "node scripts/generate-feed.mjs --check",
+    "prebuild": "npm run check:aahp && npm run check:feed && npm run check:handoff && npm run check:self-scan",
+    "prepublishOnly": "npm run build",
+    "prepare": "tsc"
   },
   "keywords": [
     "security",
@@ -30,7 +44,11 @@
     "cli",
     "github-action",
     "sarif",
-    "sbom"
+    "sbom",
+    "slsa",
+    "cyclonedx",
+    "devsecops",
+    "threat-intelligence"
   ],
   "author": "Elvatis <emre.kohler@elvatis.com>",
   "license": "Apache-2.0",
@@ -43,20 +61,29 @@
   },
   "homepage": "https://github.com/homeofe/supply-chain-guard#readme",
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "files": [
     "dist/**/*",
     "action.yml",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "socket.yml",
+    "policy-schema.json",
+    "self-scan-manifest.json"
   ],
   "dependencies": {
-    "commander": "^13.1.0"
+    "commander": "^14.0.3"
   },
   "devDependencies": {
-    "@types/node": "^22.13.0",
-    "typescript": "^5.7.0",
-    "vitest": "^3.0.0"
+    "@babel/parser": "^7.29.7",
+    "@elvatis_com/aahp": "3.10.0",
+    "@types/node": "^26.2.0",
+    "@vitest/coverage-v8": "^4.1.11",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
+    "packageurl-js": "^2.0.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
   }
 }

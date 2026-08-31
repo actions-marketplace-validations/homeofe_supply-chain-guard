@@ -7,15 +7,60 @@
  */
 
 import type { Finding } from "./types.js";
+import {
+  AUTO_RUN_LIFECYCLE_HOOKS,
+  type AutoRunLifecycleHook,
+} from "./patterns.js";
 
-interface InstallScripts {
-  preinstall?: string;
-  postinstall?: string;
-  install?: string;
-  preuninstall?: string;
-  postuninstall?: string;
-  prepare?: string;
-}
+// ── INSTALL_HOOK_HOST_RUNTIME_PATCH detection ───────────────────────────────
+// An install hook that patches/mutates a HOST AGENT RUNTIME (OpenClaw, Hermes,
+// Claude Code, ...) - rewriting another installed package's code so the plugin
+// can hook into it (e.g. intercept after-tool-call messages). Fires ONLY on the
+// combination of a runtime target AND a code-mutation action, so ordinary build
+// hooks (node scripts/build.js, npm run build, tsc, patch-package) never match.
+
+/** Names of agent host runtimes and their internal hook symbols. */
+const HOST_RUNTIME_RE =
+  /\b(?:openclaw|hermes|claude[-_ ]?code|claude[-_ ]?desktop|cursor|windsurf|cline|roo[-_ ]?code|aider|continue\.dev)\b|after[-_]tool[-_]call|before[-_]tool[-_]call|hook[-_ ]?event|tool[-_ ]?call[-_ ]?message|dispatch-[\w-]*\.(?:js|mjs|cjs)/i;
+
+/** A write into another agent runtime's installed code or config directory. */
+const HOST_RUNTIME_PATH_RE =
+  /node_modules[\\/][^\s'"]*(?:openclaw|hermes)|[~./][\w./-]*\.(?:openclaw|claude|cursor|windsurf|hermes)\b/i;
+
+/** A code MUTATION (not build-output generation): patch/inject/rewrite/sed -i. */
+const CODE_MUTATE_RE =
+  /\b(?:patch|inject|mutate|overwrite|rewrite|monkey[-\s]?patch|codemod)\b|\bsed\s+-i\b|\.patch(?:\.sh)?\b/i;
+
+// ── INSTALL_HOOK_PERSISTENCE_WRITE detection ────────────────────────────────
+// An install hook that registers code to run AGAIN LATER, independently of the
+// package being installed: a launchd agent, a systemd unit, a cron entry, a
+// scheduled task, a Windows Run key, a Startup-folder entry, or a Python .pth
+// that the interpreter auto-imports.
+//
+// Scoped deliberately to the package.json lifecycle-script strings this module
+// already reads - AUTO_RUN_LIFECYCLE_HOOKS, the same list npm-scanner.ts and
+// scanner.ts use. That is the whole reason its false-positive surface is small:
+// installing persistence from an install hook has essentially no legitimate
+// form, whereas the same commands in ordinary source belong to any service
+// manager, installer or devops tool and would false-positive constantly.
+//
+// It also means the check only sees the hook STRING. A hook that shells out to
+// `node scripts/configure.js` hides the call completely, so this raises the cost
+// of the attack rather than closing it. Said plainly in the CHANGELOG too.
+//
+// Each alternative is specific enough to stand alone, or pairs two required
+// parts (`schtasks` with `/create`, `site-packages` with `.pth`). Gaps are
+// bounded so the expression cannot backtrack pathologically on a long one-liner.
+
+/** Registration of a persistence mechanism with the operating system. */
+const PERSISTENCE_WRITE_RE =
+  /\blaunchctl\b|\bsystemctl\b[^\n]{0,40}\b(?:enable|link)\b|\bcrontab\b|\bschtasks\b[^\n]{0,60}\/create\b|Library[\\/]+Launch(?:Agents|Daemons)|\.config[\\/]+systemd[\\/]+user|\/etc\/systemd\/system|\/etc\/cron\.[a-z]+|Start\s?Menu[\\/]+Programs[\\/]+Startup|CurrentVersion[\\/]+Run\b|site-packages[^\n]{0,80}\.pth\b/i;
+
+/**
+ * Derived from AUTO_RUN_LIFECYCLE_HOOKS rather than hand-listed, so adding a
+ * hook to that list cannot leave this scanner reading a stale subset.
+ */
+type InstallScripts = Partial<Record<AutoRunLifecycleHook, string>>;
 
 /**
  * Deep-analyze install hook scripts from package.json.
@@ -25,9 +70,7 @@ export function analyzeInstallHooks(
   relativePath: string,
 ): Finding[] {
   const findings: Finding[] = [];
-  const hookNames: (keyof InstallScripts)[] = [
-    "preinstall", "postinstall", "install", "preuninstall", "postuninstall", "prepare",
-  ];
+  const hookNames = AUTO_RUN_LIFECYCLE_HOOKS;
 
   for (const hook of hookNames) {
     const script = scripts[hook];
@@ -59,6 +102,37 @@ export function analyzeInstallHooks(
         confidence: 0.95,
         category: "malware",
         recommendation: "Never download and execute code during npm install. This is almost certainly malicious.",
+      });
+    }
+
+    // Registering OS-level persistence from an install hook
+    if (PERSISTENCE_WRITE_RE.test(script)) {
+      findings.push({
+        rule: "INSTALL_HOOK_PERSISTENCE_WRITE",
+        description: `${hook} script registers OS-level persistence (launchd, systemd, cron, a scheduled task, a Run key, a Startup entry, or an auto-imported .pth). Installing a package should not schedule code to run again later, and this is how a one-shot credential stealer becomes a permanent re-harvester.`,
+        severity: "high",
+        file: relativePath,
+        match: truncate(`${hook}: ${script}`),
+        confidence: 0.8,
+        category: "malware",
+        recommendation: "Do not let a package install persistence at install time. Install with --ignore-scripts, inspect what the hook schedules, and remove any launchd/systemd/cron entry it already created. Background services should be an explicit, user-invoked step.",
+      });
+    }
+
+    // Host agent runtime patch/mutation (e.g. OpenClaw after-tool-call patching)
+    if (
+      (HOST_RUNTIME_RE.test(script) || HOST_RUNTIME_PATH_RE.test(script)) &&
+      CODE_MUTATE_RE.test(script)
+    ) {
+      findings.push({
+        rule: "INSTALL_HOOK_HOST_RUNTIME_PATCH",
+        description: `${hook} script patches or mutates a host agent runtime (OpenClaw/Hermes/Claude Code) during installation. Rewriting another installed package's code to hook into it is a distinct supply-chain risk - it can silently intercept tool calls, conversation messages, or credentials inside the host agent.`,
+        severity: "high",
+        file: relativePath,
+        match: truncate(`${hook}: ${script}`),
+        confidence: 0.8,
+        category: "supply-chain",
+        recommendation: "Do not let a package modify the host agent runtime at install time. Review exactly what the patch changes (tool-call hooks, message capture), install with --ignore-scripts, and inspect any scripts/*.patch.sh before trusting the package. Runtime integration should be an explicit, user-invoked step, not a silent postinstall.",
       });
     }
 
@@ -160,14 +234,12 @@ export function extractInstallScripts(
   try {
     const pkg = JSON.parse(content) as { scripts?: Record<string, string> };
     if (!pkg.scripts) return null;
-    return {
-      preinstall: pkg.scripts.preinstall,
-      postinstall: pkg.scripts.postinstall,
-      install: pkg.scripts.install,
-      preuninstall: pkg.scripts.preuninstall,
-      postuninstall: pkg.scripts.postuninstall,
-      prepare: pkg.scripts.prepare,
-    };
+    const scripts: InstallScripts = {};
+    for (const hook of AUTO_RUN_LIFECYCLE_HOOKS) {
+      const value = pkg.scripts[hook];
+      if (typeof value === "string") scripts[hook] = value;
+    }
+    return scripts;
   } catch {
     return null;
   }

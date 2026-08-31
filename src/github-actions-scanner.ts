@@ -8,42 +8,51 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { Finding, Severity } from "./types.js";
+import type { Finding, PatternEntry } from "./types.js";
+import { matchPatternInFile } from "./pattern-scanner.js";
+import { validatePatternSet } from "./patterns.js";
+import { WORKFLOW_BROAD_GAP_MATCHERS } from "./workflow-pattern-matchers.js";
+import {
+  parseWorkflow,
+  classifyWorkflowLines,
+  type WfStep,
+  type WfJob,
+} from "./workflow-ast.js";
 
 /**
  * Patterns for detecting dangerous content in GitHub Actions workflow files.
  */
-const WORKFLOW_PATTERNS: Array<{
-  pattern: string;
-  description: string;
-  severity: Severity;
-  rule: string;
-  flags?: string;
-}> = [
+export const WORKFLOW_PATTERNS: Array<
+  Omit<PatternEntry, "name"> & { flags?: string }
+> = [
   // Remote content piped to shell execution
   {
     pattern: "curl\\s+[^|]*\\|\\s*(?:bash|sh|zsh|node|python|perl|ruby)",
     description: "Remote content fetched with curl and piped to shell execution",
     severity: "high",
     rule: "GHA_CURL_PIPE_EXEC",
+    correlatedMatcher: WORKFLOW_BROAD_GAP_MATCHERS.CURL_PIPE_EXEC,
   },
   {
     pattern: "wget\\s+[^|]*\\|\\s*(?:bash|sh|zsh|node|python|perl|ruby)",
     description: "Remote content fetched with wget and piped to shell execution",
     severity: "high",
     rule: "GHA_WGET_PIPE_EXEC",
+    correlatedMatcher: WORKFLOW_BROAD_GAP_MATCHERS.WGET_PIPE_EXEC,
   },
   {
     pattern: "curl\\s+.*-o\\s+\\S+.*&&.*(?:bash|sh|chmod\\s+\\+x)",
     description: "Remote script downloaded and executed in workflow",
     severity: "high",
     rule: "GHA_CURL_DOWNLOAD_EXEC",
+    correlatedMatcher: WORKFLOW_BROAD_GAP_MATCHERS.CURL_DOWNLOAD_EXEC,
   },
   {
     pattern: "wget\\s+.*-O\\s+\\S+.*&&.*(?:bash|sh|chmod\\s+\\+x)",
     description: "Remote script downloaded with wget and executed in workflow",
     severity: "high",
     rule: "GHA_WGET_DOWNLOAD_EXEC",
+    correlatedMatcher: WORKFLOW_BROAD_GAP_MATCHERS.WGET_DOWNLOAD_EXEC,
   },
 
   // Secrets exfiltration via network
@@ -52,24 +61,28 @@ const WORKFLOW_PATTERNS: Array<{
     description: "Secret value passed to curl command (potential exfiltration)",
     severity: "high",
     rule: "GHA_SECRET_CURL",
+    correlatedMatcher: WORKFLOW_BROAD_GAP_MATCHERS.SECRET_TO_CURL,
   },
   {
     pattern: "curl.*\\$\\{\\{\\s*secrets\\.[^}]+\\}\\}",
     description: "Secret value sent via curl request (potential exfiltration)",
     severity: "high",
     rule: "GHA_SECRET_CURL",
+    correlatedMatcher: WORKFLOW_BROAD_GAP_MATCHERS.CURL_TO_SECRET,
   },
   {
     pattern: "\\$\\{\\{\\s*secrets\\.[^}]+\\}\\}.*wget",
     description: "Secret value passed to wget command (potential exfiltration)",
     severity: "high",
     rule: "GHA_SECRET_WGET",
+    correlatedMatcher: WORKFLOW_BROAD_GAP_MATCHERS.SECRET_TO_WGET,
   },
   {
     pattern: "wget.*\\$\\{\\{\\s*secrets\\.[^}]+\\}\\}",
     description: "Secret value sent via wget request (potential exfiltration)",
     severity: "high",
     rule: "GHA_SECRET_WGET",
+    correlatedMatcher: WORKFLOW_BROAD_GAP_MATCHERS.WGET_TO_SECRET,
   },
 
   // Base64 encoded payloads
@@ -84,6 +97,7 @@ const WORKFLOW_PATTERNS: Array<{
     description: "Base64 decoded content piped to shell execution",
     severity: "high",
     rule: "GHA_BASE64_EXEC",
+    correlatedMatcher: WORKFLOW_BROAD_GAP_MATCHERS.BASE64_EXEC,
   },
   {
     pattern: "\\batob\\s*\\(",
@@ -92,12 +106,13 @@ const WORKFLOW_PATTERNS: Array<{
     rule: "GHA_ATOB_USAGE",
   },
 
-  // Environment variable exfiltration — requires secrets/env passed as DATA (not as URL)
+  // Environment variable exfiltration - requires secrets/env passed as DATA (not as URL)
   {
     pattern: "curl\\b[^'\"\\n]*(?:-d|--data|--data-raw|-H|--header)[^'\"\\n]*\\$\\{\\{\\s*(?:secrets|env)\\.",
     description: "Secret or env variable passed as curl request data/header (potential exfiltration)",
     severity: "high",
     rule: "GHA_ENV_EXFIL",
+    correlatedMatcher: WORKFLOW_BROAD_GAP_MATCHERS.ENV_EXFIL,
   },
 
   // Suspicious shell patterns
@@ -115,24 +130,15 @@ const WORKFLOW_PATTERNS: Array<{
   },
 
   // ── 2025 attack patterns (PPE, OIDC theft, cache/artifact poisoning) ──
-
-  // Poisoned Pipeline Execution: pull_request_target + unsanitized PR context in run:
-  {
-    pattern: "\\$\\{\\{\\s*github\\.event\\.pull_request\\.",
-    description:
-      "Unsanitized pull_request event context used in workflow step — potential Poisoned Pipeline Execution (PPE). " +
-      "An attacker-controlled PR can inject arbitrary commands.",
-    severity: "critical",
-    rule: "GHA_PPE_PULL_TARGET",
-  },
-  // Script injection via user-controlled context (issue body, PR title, commit message)
-  {
-    pattern: "\\$\\{\\{\\s*github\\.event\\.(?:issue|pull_request|head_commit|commits?)\\.[^}]*(?:body|title|message|name)\\s*\\}\\}",
-    description:
-      "User-controlled GitHub event data (issue/PR body, commit message) injected directly into a run: step — GitHub Actions Script Injection risk",
-    severity: "critical",
-    rule: "GHA_SCRIPT_INJECTION",
-  },
+  //
+  // GHA_PPE_PULL_TARGET and GHA_SCRIPT_INJECTION used to live here as bare
+  // line regexes. They are now context-aware rules in
+  // checkInterpolationSinkRules() below: a plain regex over the whole file
+  // cannot tell an interpolation that lands in a `run:` body (the attack) from
+  // one that lands in an `env:` value (GitHub's official mitigation for that
+  // very attack), and PPE additionally depends on which trigger fires the
+  // workflow.
+  //
   // OIDC token theft: id-token:write permission combined with outbound network call
   {
     pattern: "id-token:\\s*write",
@@ -151,24 +157,19 @@ const WORKFLOW_PATTERNS: Array<{
     severity: "high",
     rule: "GHA_CACHE_POISONING",
   },
-  // Artifact injection: download-artifact from a PR-triggered workflow used in release/deploy
-  {
-    pattern: "actions/download-artifact",
-    description:
-      "Workflow downloads build artifacts. If artifacts originate from an untrusted PR workflow, " +
-      "they may have been tampered with (artifact injection attack).",
-    severity: "low",
-    rule: "GHA_ARTIFACT_DOWNLOAD",
-  },
+
   // Self-modifying workflow: writing to .github/workflows/
   {
     pattern: "(?:echo|tee|cat|cp|mv|write).*\\.github[\\\\/]workflows[\\\\/]",
     description:
-      "Workflow writes to .github/workflows/ — this can persist malicious code by modifying CI pipeline files (supply chain worm pattern)",
+      "Workflow writes to .github/workflows/ - this can persist malicious code by modifying CI pipeline files (supply chain worm pattern)",
     severity: "critical",
     rule: "GHA_SELF_MODIFY",
+    correlatedMatcher: WORKFLOW_BROAD_GAP_MATCHERS.SELF_MODIFY,
   },
 ];
+
+validatePatternSet("WORKFLOW_PATTERNS", WORKFLOW_PATTERNS);
 
 /**
  * Known compromised action commit SHAs.
@@ -176,11 +177,11 @@ const WORKFLOW_PATTERNS: Array<{
  * Sources: GitHub Security Advisories, supply chain incident reports.
  */
 const KNOWN_MALICIOUS_ACTION_SHAS = new Map<string, string>([
-  // tj-actions/changed-files — compromised September 2025 (GHSA-2025-tj-actions)
+  // tj-actions/changed-files - compromised September 2025 (GHSA-2025-tj-actions)
   // Exfiltrated CI secrets to attacker-controlled server via public build logs
   ["d8462b4fc879d893f8f3b49843bde065f3f07b82", "tj-actions/changed-files (Sep 2025 compromise)"],
   ["0e58ed8671d6b60d0890c21b07f8835ace038e67", "tj-actions/changed-files (Sep 2025 compromise variant)"],
-  // reviewdog/action-setup — compromised as part of tj-actions attack chain
+  // reviewdog/action-setup - compromised as part of tj-actions attack chain
   ["3f401fe1d58fe77e10d665ab713057369b8cdfe4", "reviewdog/action-setup (Sep 2025 attack chain)"],
 ]);
 
@@ -262,8 +263,676 @@ function scanWorkflowContent(
   // Check action references (uses: directives)
   checkActionReferences(lines, relativePath, findings);
 
-  // Check for secrets sent to external URLs across multi-line run blocks
-  checkSecretsExfiltration(lines, relativePath, findings);
+  // Check for secrets sent to external URLs from within a single step
+  checkSecretsExfiltration(content, relativePath, findings);
+
+  // v5.18: PPE / script-injection, scoped to lines that are actually executed
+  // and (for PPE) to workflows whose trigger grants the elevated context.
+  checkInterpolationSinkRules(content, relativePath, findings);
+
+  // v5.7: structural, trigger-aware rules (Cordyceps class) - these need to
+  // know which event fires the workflow and what its token can do, which the
+  // line-by-line passes above are blind to.
+  checkWorkflowAstRules(content, relativePath, findings);
+
+  // v5.23.4: artifact downloads are findings only when the workflow cannot
+  // prove a trusted current-run producer/consumer relationship.
+  checkArtifactDownloadRules(content, relativePath, findings);
+
+  // v5.10: GitLost-class agent-workflow posture (trigger + agent step + token + public post)
+  checkAgentWorkflowRules(content, relativePath, findings);
+}
+
+const TRUSTED_ARTIFACT_TRIGGERS = new Set([
+  "push",
+  "workflow_dispatch",
+  "schedule",
+  "release",
+  "repository_dispatch",
+]);
+
+function isArtifactAction(step: WfStep, operation: "upload" | "download"): boolean {
+  return new RegExp(`^actions/${operation}-artifact@`, "i").test(step.uses ?? "");
+}
+
+function hasStableActionRef(step: WfStep): boolean {
+  const ref = (step.uses ?? "").split("@").pop() ?? "";
+  return SHA_PATTERN.test(ref) || /^v?\d+(?:\.\d+){0,2}$/.test(ref);
+}
+
+/** Replace dynamic matrix/expression segments with globs before comparing names. */
+function normalizeArtifactSelector(value: string): string {
+  return value.trim().replace(/\$\{\{.*?\}\}/g, "*");
+}
+
+function globToRegExp(glob: string): RegExp {
+  let source = "^";
+  for (const ch of glob) {
+    if (ch === "*") source += ".*";
+    else if (ch === "?") source += ".";
+    else source += "\\^$.*+?()[]{}|".includes(ch) ? `\\${ch}` : ch;
+  }
+  return new RegExp(`${source}$`, "i");
+}
+
+/**
+ * Prove that two artifact selectors can identify the same name. Returning false
+ * must be exact because it prevents a producer from satisfying the trust proof.
+ */
+function artifactSelectorsOverlap(left: string, right: string): boolean {
+  const a = normalizeArtifactSelector(left);
+  const b = normalizeArtifactSelector(right);
+  const aWild = /[*?]/.test(a);
+  const bWild = /[*?]/.test(b);
+  if (!aWild) return bWild ? globToRegExp(b).test(a) : a.toLowerCase() === b.toLowerCase();
+  if (!bWild) return globToRegExp(a).test(b);
+
+  const fixedPrefix = (value: string): string => value.split(/[*?]/, 1)[0] ?? "";
+  const fixedSuffix = (value: string): string => {
+    const parts = value.split(/[*?]/);
+    return parts[parts.length - 1] ?? "";
+  };
+  const aPrefix = fixedPrefix(a).toLowerCase();
+  const bPrefix = fixedPrefix(b).toLowerCase();
+  const aSuffix = fixedSuffix(a).toLowerCase();
+  const bSuffix = fixedSuffix(b).toLowerCase();
+  const prefixCompatible = aPrefix.startsWith(bPrefix) || bPrefix.startsWith(aPrefix);
+  const suffixCompatible = aSuffix.endsWith(bSuffix) || bSuffix.endsWith(aSuffix);
+  return prefixCompatible && suffixCompatible;
+}
+
+function artifactSelectionMatches(upload: WfStep, download: WfStep): boolean {
+  const uploadName = upload.withName ?? "artifact";
+  if (download.withName) return artifactSelectorsOverlap(uploadName, download.withName);
+  if (download.withPattern) return artifactSelectorsOverlap(uploadName, download.withPattern);
+  return true; // no name or pattern downloads every artifact in the current run
+}
+
+function transitiveNeeds(job: WfJob, jobs: WfJob[]): WfJob[] {
+  const byId = new Map(jobs.map((candidate) => [candidate.id, candidate]));
+  const found: WfJob[] = [];
+  const seen = new Set<string>();
+  const pending = [...job.needs];
+  while (pending.length > 0) {
+    const id = pending.pop()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const dependency = byId.get(id);
+    if (!dependency) continue;
+    found.push(dependency);
+    pending.push(...dependency.needs);
+  }
+  return found;
+}
+
+function checkArtifactDownloadRules(
+  content: string,
+  relativePath: string,
+  findings: Finding[],
+): void {
+  let ast;
+  try {
+    ast = parseWorkflow(content);
+  } catch {
+    ast = undefined;
+  }
+
+  const rawLines = content.replace(/\r/g, "").split("\n");
+  const downloads = ast?.jobs.flatMap((job) =>
+    job.steps
+      .filter((step) => isArtifactAction(step, "download"))
+      .map((step) => ({ job, step })),
+  ) ?? [];
+
+  // Fail closed when the structural parser cannot associate a real action step.
+  if (downloads.length === 0) {
+    for (let i = 0; i < rawLines.length; i++) {
+      const action = /^\s*-?\s*uses:\s*(actions\/download-artifact@[^\s#]+)/i.exec(rawLines[i] ?? "");
+      if (!action) continue;
+      findings.push({
+        rule: "GHA_ARTIFACT_DOWNLOAD",
+        description:
+          "Workflow downloads an artifact, but its producer/run trust relationship could not be established structurally.",
+        severity: "low",
+        file: relativePath,
+        line: i + 1,
+        match: truncateMatch(action[1] ?? "actions/download-artifact"),
+        recommendation: getWorkflowRecommendation("GHA_ARTIFACT_DOWNLOAD"),
+      });
+    }
+    return;
+  }
+
+  const trustedTriggers =
+    ast !== undefined &&
+    ast.triggers.length > 0 &&
+    ast.triggers.every((trigger) => TRUSTED_ARTIFACT_TRIGGERS.has(trigger));
+
+  for (const { job, step } of downloads) {
+    const currentRun = !step.withGithubToken && !step.withRepository && !step.withRunId;
+    const stableDownload = hasStableActionRef(step);
+    const upstream = ast ? transitiveNeeds(job, ast.jobs) : [];
+    const upstreamIds = new Set(upstream.map((producerJob) => producerJob.id));
+    const matchingProducers = ast?.jobs.flatMap((producerJob) =>
+      producerJob.steps
+        .filter(
+          (upload) =>
+            isArtifactAction(upload, "upload") && artifactSelectionMatches(upload, step),
+        )
+        .map((upload) => ({ producerJob, upload })),
+    ) ?? [];
+    const matchingProducer =
+      matchingProducers.length > 0 &&
+      matchingProducers.every(
+        ({ producerJob, upload }) =>
+          upstreamIds.has(producerJob.id) && hasStableActionRef(upload),
+      );
+
+    if (currentRun && trustedTriggers && stableDownload && matchingProducer) continue;
+
+    const reasons: string[] = [];
+    if (!currentRun) reasons.push("the step explicitly enables cross-run or cross-repository access");
+    if (!trustedTriggers) {
+      reasons.push(
+        ast?.triggers.length
+          ? `the workflow has a low-trust or unsupported trigger (${ast.triggers.join(", ")})`
+          : "the workflow trigger could not be established",
+      );
+    }
+    if (!stableDownload) reasons.push("the download action reference is mutable or unrecognized");
+    if (!matchingProducer) {
+      reasons.push("no matching artifact producer is linked through the consumer job's transitive needs graph");
+    }
+
+    findings.push({
+      rule: "GHA_ARTIFACT_DOWNLOAD",
+      description:
+        `Workflow downloads an artifact without a complete trusted current-run handoff: ${reasons.join("; ")}. ` +
+        "Treat the artifact as untrusted until its producer and run identity are verified.",
+      severity: "low",
+      file: relativePath,
+      line: step.line,
+      match: truncateMatch(step.uses ?? "actions/download-artifact"),
+      recommendation: getWorkflowRecommendation("GHA_ARTIFACT_DOWNLOAD"),
+    });
+  }
+}
+
+/**
+ * v5.10 GitLost-class rules. An AI-agent step that ingests attacker-controllable
+ * event text, holds a cross-repo-capable token, and can post publicly is the
+ * exact "lethal trifecta" the GitLost disclosure (Noma, July 2026) exploited.
+ * We can only see the checked-in POSTURE, never the runtime injection payload,
+ * so these are pre-attack hardening warnings, not attack detections.
+ */
+function checkAgentWorkflowRules(
+  content: string,
+  relativePath: string,
+  findings: Finding[],
+): void {
+  let ast;
+  try {
+    ast = parseWorkflow(content);
+  } catch {
+    return;
+  }
+
+  const triggerSet = new Set(ast.triggers);
+  const untrusted = AGENT_UNTRUSTED_TRIGGERS.filter((t) => triggerSet.has(t));
+  if (untrusted.length === 0) return; // no attacker-controllable input path
+
+  // Collect agent steps across all jobs.
+  const agentSteps: Array<{ step: WfStep; job: WfJob }> = [];
+  for (const job of ast.jobs) {
+    for (const step of job.steps) {
+      if (isAgentStep(step)) agentSteps.push({ step, job });
+    }
+  }
+  if (agentSteps.length === 0) return;
+
+  const canPostPublicly = (job: WfJob): boolean => {
+    const scopeWrites = (p: { scopes: Record<string, string>; writeAll: boolean }) =>
+      p.writeAll || PUBLIC_POST_SCOPES.some((s) => p.scopes[s] === "write");
+    return scopeWrites(ast.permissions) || scopeWrites(job.permissions);
+  };
+
+  for (const { step, job } of agentSteps) {
+    // GHA_AGENT_UNTRUSTED_PROMPT (critical): agent ingests untrusted event context.
+    if (UNTRUSTED_CTX_RE.test(agentStepText(step))) {
+      findings.push({
+        rule: "GHA_AGENT_UNTRUSTED_PROMPT",
+        description:
+          `AI-agent step ingests attacker-controllable GitHub event context ` +
+          `(issue/PR/comment body or title) as part of its instructions on an untrusted ` +
+          `trigger (${untrusted.join(", ")}). This is the core of the GitLost prompt-injection ` +
+          `class: the agent cannot distinguish your instructions from an attacker's issue text.`,
+        severity: "critical",
+        file: relativePath,
+        line: step.line,
+        recommendation: getWorkflowRecommendation("GHA_AGENT_UNTRUSTED_PROMPT"),
+      });
+    }
+
+    // GHA_AGENT_PUBLIC_POST (high): the same job can post the agent's output publicly.
+    if (canPostPublicly(job)) {
+      findings.push({
+        rule: "GHA_AGENT_PUBLIC_POST",
+        description:
+          `AI-agent job on an untrusted trigger (${untrusted.join(", ")}) also holds ` +
+          `issues:write / pull-requests:write, so the agent can post its output as a public ` +
+          `comment. That comment is the GitLost exfiltration channel: private data the agent ` +
+          `read becomes readable by anyone who can see the issue.`,
+        severity: "high",
+        file: relativePath,
+        line: step.line,
+        recommendation: getWorkflowRecommendation("GHA_AGENT_PUBLIC_POST"),
+      });
+    }
+
+    // GHA_AGENT_CROSS_REPO_TOKEN (high): a non-default token is fed to the agent.
+    const tokenRefs = [
+      step.withToken ?? "",
+      step.env?.GH_TOKEN ?? "",
+      step.env?.GITHUB_TOKEN ?? "",
+    ].join(" ");
+    const usesNonDefaultSecret = /\$\{\{\s*secrets\.(?!GITHUB_TOKEN\b)[A-Za-z0-9_]+\s*\}\}/.test(tokenRefs);
+    if (usesNonDefaultSecret) {
+      findings.push({
+        rule: "GHA_AGENT_CROSS_REPO_TOKEN",
+        description:
+          `AI-agent step is handed a custom token secret (not the default GITHUB_TOKEN). ` +
+          `A broadly-scoped PAT lets the agent read OTHER repositories, including private ones - ` +
+          `the cross-repo read that turns a single-repo prompt injection into an org-wide leak. ` +
+          `Verify this token is a fine-grained, single-repository token.`,
+        severity: "high",
+        file: relativePath,
+        line: step.line,
+        recommendation: getWorkflowRecommendation("GHA_AGENT_CROSS_REPO_TOKEN"),
+      });
+    }
+  }
+
+  // GHA_AGENT_NO_AUTHOR_GATE (medium): agent driven by an externally-fileable
+  // trigger with no author-trust gate anywhere in the file.
+  const externallyFileable = EXTERNALLY_FILEABLE_TRIGGERS.some((t) => triggerSet.has(t));
+  if (externallyFileable && !AUTHOR_GATE_RE.test(content)) {
+    findings.push({
+      rule: "GHA_AGENT_NO_AUTHOR_GATE",
+      description:
+        `AI-agent workflow is triggered by issues/comments (externally fileable by anyone) ` +
+        `but has no author-trust gate. An unauthenticated attacker can open an issue and drive ` +
+        `the agent - the entry point the GitLost attack used.`,
+      severity: "medium",
+      file: relativePath,
+      line: agentSteps[0]!.step.line,
+      recommendation: getWorkflowRecommendation("GHA_AGENT_NO_AUTHOR_GATE"),
+    });
+  }
+}
+
+// ── v5.7 Cordyceps trigger-aware rules ──────────────────────────────────────
+
+/**
+ * Triggers that run in the BASE repository context with access to secrets and
+ * a read+write GITHUB_TOKEN (unlike plain `pull_request`, which runs in the
+ * fork context with a read-only token). These are the elevated-privilege
+ * entry points the Cordyceps composition attacks abuse.
+ */
+const PRIVILEGED_TRIGGERS = [
+  "pull_request_target",
+  "workflow_run",
+  "issue_comment",
+  "pull_request_review_comment",
+];
+
+/** Triggers where checking out untrusted PR/head code executes it WITH secrets. */
+const PWN_CHECKOUT_TRIGGERS = ["pull_request_target", "workflow_run", "issue_comment"];
+
+/**
+ * A `with: ref:` value that resolves to attacker-controlled PR/head code.
+ * Covers the head ref/sha, the numeric `refs/pull/N/merge|head` form, and
+ * indirection through a matrix var / step output / needs output (all common
+ * pwn-request evasions). Deliberately excludes the base ref (github.sha /
+ * github.ref) which points at the trusted default branch.
+ */
+const PR_HEAD_REF_RE =
+  /github\.head_ref|github\.event\.pull_request\.head|github\.event\.workflow_run\.head|github\.event\.(?:pull_request\.number|number)|refs\/pull\/|\$\{\{\s*(?:matrix|steps|needs)\./;
+
+/** Untrusted context interpolated inside an actions/github-script `script:` body. */
+const UNTRUSTED_CTX_RE =
+  /\$\{\{\s*github\.(?:event\.(?:issue|pull_request|comment|review|discussion|head_commit|commits?)|head_ref|ref_name)\b/;
+
+// ── v5.10 GitLost-class agent-workflow rules ────────────────────────────────
+
+/**
+ * Actions that hand control to an autonomous AI agent which then reads workflow
+ * inputs (issue/PR/comment text) as instructions. Matched owner/repo prefix,
+ * ref-agnostic. This is an allowlist that will grow as new agent actions ship.
+ */
+const AGENT_ACTION_RE =
+  /^(?:anthropics\/claude-code-action|anthropics\/claude-code-base-action|githubnext\/gh-aw|google-github-actions\/run-gemini-cli|google-gemini\/gemini-cli-action|openai\/codex-action)(?:@|$|\/)/i;
+
+/** Agent CLIs invoked from a `run:` block (the non-action form of the same thing). */
+const AGENT_CLI_RE =
+  /\b(?:claude\s+(?:-p|--print)|copilot\s+(?:-p|suggest|exec)|gemini\s+(?:-p|--prompt)|codex\s+exec|aider\s+(?:--message|-m)\b)/i;
+
+/**
+ * Triggers that feed ATTACKER-CONTROLLABLE text (issue/PR/comment/discussion
+ * bodies and titles) into the workflow, and hence into an agent step's prompt.
+ * `issues`/`issue_comment` are the verified GitLost vectors; the pull_request*
+ * and discussion* families are the same class.
+ */
+const AGENT_UNTRUSTED_TRIGGERS = [
+  "issues",
+  "issue_comment",
+  "pull_request",
+  "pull_request_target",
+  "pull_request_review",
+  "pull_request_review_comment",
+  "discussion",
+  "discussion_comment",
+];
+
+/** Token scopes that let a job post PUBLICLY (the GitLost exfiltration channel). */
+const PUBLIC_POST_SCOPES = ["issues", "pull-requests"];
+
+/** Any signal that the workflow gates on WHO triggered it (author trust). */
+const AUTHOR_GATE_RE =
+  /author_association|github\.actor\b|github\.triggering_actor\b|\.user\.login\b/;
+
+/** Issue/comment triggers where an anonymous external user drives the agent. */
+const EXTERNALLY_FILEABLE_TRIGGERS = ["issues", "issue_comment"];
+
+/** True when a step hands control to an AI agent (action form or CLI form). */
+function isAgentStep(step: { uses?: string; run?: string }): boolean {
+  if (step.uses && AGENT_ACTION_RE.test(step.uses)) return true;
+  if (step.run && AGENT_CLI_RE.test(step.run)) return true;
+  return false;
+}
+
+/** All text an agent step ingests where untrusted context could appear. */
+function agentStepText(step: {
+  withPrompt?: string; run?: string; env?: Record<string, string>;
+}): string {
+  const envVals = step.env ? Object.values(step.env).join("\n") : "";
+  return [step.withPrompt ?? "", step.run ?? "", envVals].join("\n");
+}
+
+/**
+ * Structural rules that depend on the workflow's trigger and token model.
+ * Parsed once per file via the zero-dependency workflow-ast parser.
+ */
+function checkWorkflowAstRules(
+  content: string,
+  relativePath: string,
+  findings: Finding[],
+): void {
+  let ast;
+  try {
+    ast = parseWorkflow(content);
+  } catch {
+    return; // never let a parse hiccup break the scan
+  }
+
+  const lines = content.split("\n");
+  const findLine = (re: RegExp): number | undefined => {
+    for (let i = 0; i < lines.length; i++) {
+      if (re.test(lines[i] ?? "")) return i + 1;
+    }
+    return undefined;
+  };
+
+  const triggerSet = new Set(ast.triggers);
+  const privileged = PRIVILEGED_TRIGGERS.filter((t) => triggerSet.has(t));
+
+  // GHA_PRIVILEGED_TRIGGER - the workflow runs in an elevated context.
+  if (privileged.length > 0) {
+    findings.push({
+      rule: "GHA_PRIVILEGED_TRIGGER",
+      description:
+        `Workflow is triggered by ${privileged.join(", ")}, which runs in the base repository ` +
+        `context with access to secrets and a read/write GITHUB_TOKEN. This is the elevated entry ` +
+        `point Cordyceps-style attacks abuse; every step here is security-sensitive.`,
+      severity: "low",
+      file: relativePath,
+      line: findLine(new RegExp(`\\b(?:${privileged.join("|")})\\b`)) ?? 1,
+      match: privileged.join(", "),
+      recommendation: getWorkflowRecommendation("GHA_PRIVILEGED_TRIGGER"),
+    });
+  }
+
+  // GHA_PWN_REQUEST_CHECKOUT - privileged trigger checks out attacker PR/head code.
+  const hasPwnTrigger = ast.triggers.some((t) => PWN_CHECKOUT_TRIGGERS.includes(t));
+  if (hasPwnTrigger) {
+    for (const job of ast.jobs) {
+      for (const step of job.steps) {
+        if (
+          step.uses && /checkout/i.test(step.uses) &&
+          step.withRef && PR_HEAD_REF_RE.test(step.withRef)
+        ) {
+          findings.push({
+            rule: "GHA_PWN_REQUEST_CHECKOUT",
+            description:
+              `Privileged workflow checks out attacker-controlled PR/head code ` +
+              `(ref: ${truncateMatch(step.withRef, 60)}) and then runs it with secrets in scope. ` +
+              `This is the canonical "pwn request" - remote code execution with the maintainer token.`,
+            severity: "critical",
+            file: relativePath,
+            line: step.line,
+            match: truncateMatch(step.withRef),
+            recommendation: getWorkflowRecommendation("GHA_PWN_REQUEST_CHECKOUT"),
+          });
+        }
+      }
+    }
+  }
+
+  // GHA_GITHUB_SCRIPT_INJECTION - untrusted context eval'd as JS by github-script.
+  for (const job of ast.jobs) {
+    for (const step of job.steps) {
+      if (
+        step.uses && /github-script/i.test(step.uses) &&
+        step.withScript && UNTRUSTED_CTX_RE.test(step.withScript)
+      ) {
+        findings.push({
+          rule: "GHA_GITHUB_SCRIPT_INJECTION",
+          description:
+            `actions/github-script step evaluates untrusted GitHub event context as JavaScript at ` +
+            `runtime (code injection). An attacker who controls that context executes arbitrary code ` +
+            `with the workflow token.`,
+          severity: "high",
+          file: relativePath,
+          line: step.line,
+          recommendation: getWorkflowRecommendation("GHA_GITHUB_SCRIPT_INJECTION"),
+        });
+      }
+    }
+  }
+
+  // GHA_PERMS_WRITE_ALL - the token is granted every scope.
+  if (ast.permissions.writeAll || ast.jobs.some((j) => j.permissions.writeAll)) {
+    findings.push({
+      rule: "GHA_PERMS_WRITE_ALL",
+      description:
+        `Workflow grants "permissions: write-all", giving the GITHUB_TOKEN write access to every scope ` +
+        `(contents, packages, actions, pages, deployments...). If any step is compromised, the blast ` +
+        `radius is the whole repository.`,
+      severity: "high",
+      file: relativePath,
+      line: findLine(/permissions:\s*write-all/) ?? 1,
+      match: "write-all",
+      recommendation: getWorkflowRecommendation("GHA_PERMS_WRITE_ALL"),
+    });
+  }
+
+  // GHA_PERMS_DEFAULT_BROAD - privileged trigger with no explicit least-privilege.
+  // Fire when there is no top-level permissions block AND at least one job runs
+  // without its own block (inheriting the broad repo default). A single sibling
+  // job declaring permissions must not silence the rule for the jobs that don't.
+  const topPermsDeclared = ast.permissions.declared;
+  const someJobUnprotected =
+    ast.jobs.length === 0 || ast.jobs.some((j) => !j.permissions.declared);
+  if (privileged.length > 0 && !topPermsDeclared && someJobUnprotected) {
+    findings.push({
+      rule: "GHA_PERMS_DEFAULT_BROAD",
+      description:
+        `Privileged workflow (${privileged.join(", ")}) declares no explicit permissions, so the ` +
+        `GITHUB_TOKEN falls back to the repository default - frequently read+write across all scopes. ` +
+        `Combined with an elevated trigger, that default is loot for a Cordyceps-style compromise.`,
+      severity: "medium",
+      file: relativePath,
+      line: findLine(new RegExp(`\\b(?:${privileged.join("|")})\\b`)) ?? 1,
+      recommendation: getWorkflowRecommendation("GHA_PERMS_DEFAULT_BROAD"),
+    });
+  }
+}
+
+// ── v5.18 context-aware interpolation-sink rules ────────────────────────────
+
+/** Any `github.event.pull_request.*` expression (the PPE source). */
+const PPE_CTX_RE = /\$\{\{\s*github\.event\.pull_request\./;
+
+/**
+ * User-controlled event text: issue/PR body or title, comment/review body,
+ * commit message, discussion title. This is the script-injection SOURCE - the
+ * value an attacker writes and GitHub pastes verbatim into the program text.
+ */
+const SCRIPT_INJECTION_CTX_RE =
+  /\$\{\{\s*github\.event\.(?:issue|pull_request|head_commit|commits?|comment|review|discussion)\.[^}]*(?:body|title|message|name)\s*\}\}/;
+
+/** `${{ env.NAME }}` - the env context is ALSO template-interpolated. */
+const ENV_CTX_RE = /\$\{\{\s*env\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g;
+
+/** `KEY: <value>` inside an `env:` mapping. */
+const ENV_ASSIGN_RE = /^\s*(?:-\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+)$/;
+
+/**
+ * Triggers whose caller context is unknowable from this file alone. A reusable
+ * workflow is invoked BY another workflow, so its effective privilege is the
+ * caller's - possibly pull_request_target. Treated as privileged (fail closed).
+ */
+const CALLER_CONTEXT_TRIGGERS = ["workflow_call"];
+
+/**
+ * PPE (GHA_PPE_PULL_TARGET) and script injection (GHA_SCRIPT_INJECTION).
+ *
+ * Both rules ask the same question - "does attacker-controlled event data reach
+ * a place where it becomes code?" - and both were previously answered by a bare
+ * regex over the entire file. That over-matched in two independent ways:
+ *
+ *   1. It fired on `env: PR_TITLE: ${{ github.event.pull_request.title }}`,
+ *      which is the mitigation GitHub documents (and that this scanner's own
+ *      GHA_SCRIPT_INJECTION recommendation tells users to apply).
+ *   2. PPE fired regardless of trigger. Interpolating PR context in a plain
+ *      `pull_request` workflow runs in the FORK's context with a read-only
+ *      token and no secrets - the attacker gains nothing they did not already
+ *      have. PPE is about the ELEVATED context (pull_request_target /
+ *      workflow_run / issue_comment), where the same expression executes with
+ *      the base repository's secrets.
+ *
+ * Both rules now only consider `exec` lines (a `run:` shell body or a
+ * github-script `script:` body), and PPE additionally requires an elevated
+ * trigger. Indirection through `env:` is still caught: a value moved into an
+ * env var and then read back with `${{ env.NAME }}` (rather than the shell's
+ * `$NAME`) is interpolated into the program text just the same, and is
+ * reported at the line that reads it back.
+ */
+function checkInterpolationSinkRules(
+  content: string,
+  relativePath: string,
+  findings: Finding[],
+): void {
+  const lines = content.replace(/\r/g, "").split("\n");
+
+  let regions;
+  try {
+    regions = classifyWorkflowLines(content);
+  } catch {
+    return;
+  }
+
+  // Env vars whose value carries untrusted event data. Reading one back with
+  // ${{ env.X }} re-introduces the injection the env: hop was meant to stop.
+  const taintedEnv = { ppe: new Set<string>(), injection: new Set<string>() };
+  for (let i = 0; i < lines.length; i++) {
+    if (regions[i] !== "env") continue;
+    const m = ENV_ASSIGN_RE.exec(stripYamlComment(lines[i] ?? ""));
+    if (!m) continue;
+    if (PPE_CTX_RE.test(m[2]!)) taintedEnv.ppe.add(m[1]!);
+    if (SCRIPT_INJECTION_CTX_RE.test(m[2]!)) taintedEnv.injection.add(m[1]!);
+  }
+
+  const readsTaintedEnv = (line: string, tainted: Set<string>): boolean => {
+    if (tainted.size === 0) return false;
+    ENV_CTX_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = ENV_CTX_RE.exec(line)) !== null) {
+      if (tainted.has(m[1]!)) return true;
+    }
+    return false;
+  };
+
+  // Trigger model: which context does this workflow's token run in?
+  let triggers: string[] = [];
+  let triggersKnown = false;
+  try {
+    triggers = parseWorkflow(content).triggers;
+    triggersKnown = triggers.length > 0;
+  } catch {
+    triggersKnown = false;
+  }
+  const triggerSet = new Set(triggers);
+  const privileged = PRIVILEGED_TRIGGERS.filter((t) => triggerSet.has(t));
+  const callerContext = CALLER_CONTEXT_TRIGGERS.filter((t) => triggerSet.has(t));
+  // Fail closed: if the triggers cannot be read at all, keep reporting.
+  const ppeApplies = privileged.length > 0 || callerContext.length > 0 || !triggersKnown;
+
+  for (let i = 0; i < lines.length; i++) {
+    if (regions[i] !== "exec") continue;
+    const line = stripYamlComment(lines[i] ?? "");
+    if (!line.trim()) continue;
+
+    if (ppeApplies && (PPE_CTX_RE.test(line) || readsTaintedEnv(line, taintedEnv.ppe))) {
+      const context =
+        privileged.length > 0
+          ? `a ${privileged.join("/")} trigger`
+          : callerContext.length > 0
+            ? `a reusable (${callerContext.join("/")}) workflow whose caller may be privileged`
+            : "a workflow whose triggers could not be determined";
+      findings.push({
+        rule: "GHA_PPE_PULL_TARGET",
+        description:
+          `Unsanitized pull_request event context is interpolated into an executed step of ` +
+          `${context}, which runs in the base repository context with access to secrets and a ` +
+          `read/write GITHUB_TOKEN. An attacker-controlled PR can inject arbitrary commands that ` +
+          `execute with those privileges (Poisoned Pipeline Execution).`,
+        severity: "critical",
+        file: relativePath,
+        line: i + 1,
+        match: truncateMatch(line.trim()),
+        recommendation: getWorkflowRecommendation("GHA_PPE_PULL_TARGET"),
+      });
+    }
+
+    if (
+      SCRIPT_INJECTION_CTX_RE.test(line) ||
+      readsTaintedEnv(line, taintedEnv.injection)
+    ) {
+      findings.push({
+        rule: "GHA_SCRIPT_INJECTION",
+        description:
+          "User-controlled GitHub event data (issue/PR body, comment body, PR title, commit message) " +
+          "is interpolated directly into an executed step (run: shell body or github-script script: body). " +
+          "GitHub substitutes the value into the program text before it runs, so an attacker who writes " +
+          "that text executes commands in your runner (GitHub Actions Script Injection).",
+        severity: "critical",
+        file: relativePath,
+        line: i + 1,
+        match: truncateMatch(line.trim()),
+        recommendation: getWorkflowRecommendation("GHA_SCRIPT_INJECTION"),
+      });
+    }
+  }
 }
 
 /**
@@ -274,25 +943,56 @@ function checkWorkflowPatterns(
   relativePath: string,
   findings: Finding[],
 ): void {
-  for (const pattern of WORKFLOW_PATTERNS) {
-    const regex = new RegExp(pattern.pattern, pattern.flags ?? "i");
+  // Preserve the YAML-aware preprocessing contract while evaluating every
+  // rule through the validated shared engine. Joining with LF retains exact
+  // physical line numbers; shortening a stripped comment cannot move any
+  // surviving match to another line.
+  const strippedContent = lines.map((line) => stripYamlComment(line)).join("\n");
 
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i] ?? "";
-      const match = regex.exec(line);
-      if (match) {
-        findings.push({
-          rule: pattern.rule,
-          description: pattern.description,
-          severity: pattern.severity,
-          file: relativePath,
-          line: i + 1,
-          match: truncateMatch(match[0]),
-          recommendation: getWorkflowRecommendation(pattern.rule),
-        });
+  for (const pattern of WORKFLOW_PATTERNS) {
+    const matches = matchPatternInFile(
+      pattern,
+      strippedContent,
+      relativePath,
+      findings,
+      pattern.flags ?? "i",
+    );
+    if (!matches) continue;
+
+    for (const match of matches) {
+      findings.push({
+        rule: pattern.rule,
+        description: pattern.description,
+        severity: pattern.severity,
+        file: relativePath,
+        line: match.line,
+        match: truncateMatch(match.text),
+        recommendation: getWorkflowRecommendation(pattern.rule),
+      });
+    }
+  }
+}
+
+/**
+ * Strip a trailing YAML comment from a line. A `#` that is preceded by
+ * whitespace or at line start starts a comment; `#` inside quoted strings
+ * is preserved. v5.2.22.
+ */
+function stripYamlComment(line: string): string {
+  let inSingle = false;
+  let inDouble = false;
+  for (let j = 0; j < line.length; j++) {
+    const ch = line[j];
+    if (ch === "'" && !inDouble) inSingle = !inSingle;
+    else if (ch === '"' && !inSingle) inDouble = !inDouble;
+    else if (ch === "#" && !inSingle && !inDouble) {
+      // Comment marker: must be at start of line or preceded by whitespace
+      if (j === 0 || /\s/.test(line[j - 1]!)) {
+        return line.slice(0, j);
       }
     }
   }
+  return line;
 }
 
 /**
@@ -325,7 +1025,7 @@ function checkActionReferences(
     const ref = actionRef.substring(atIndex + 1);
     const owner = actionPath.split("/")[0] ?? "";
 
-    // Check against known malicious SHAs (highest priority — always critical)
+    // Check against known malicious SHAs (highest priority - always critical)
     if (SHA_PATTERN.test(ref) && KNOWN_MALICIOUS_ACTION_SHAS.has(ref)) {
       findings.push({
         rule: "GHA_KNOWN_MALICIOUS_SHA",
@@ -391,119 +1091,128 @@ function checkActionReferences(
   }
 }
 
+/** A secret expression: `${{ secrets.NAME }}`. */
+const SECRET_EXPR_RE = /\$\{\{\s*secrets\.\w+\s*\}\}/;
+
 /**
- * Check for secrets being sent to external URLs in run blocks.
- * Looks for multi-line run: blocks that contain both secret references
- * and outbound network calls.
+ * Commands that move data off the runner. `git fetch` is excluded: it pulls
+ * source INTO the runner and carries no secret out, and matching the bare word
+ * made the rule point at a repository sync instead of at the actual outbound
+ * call further down the same step.
+ */
+const NETWORK_CMD_RE = /\b(?:curl|wget|nc|ncat|netcat)\b|(?<!git\s)\bfetch\b/;
+
+/**
+ * Check for secrets reaching a network command inside ONE step (v5.18).
+ *
+ * The previous implementation walked the file line by line with a
+ * `envSecretsExported` flag that was file-level and STICKY: once any step
+ * anywhere in the file put a secret in its `env:`, every later run block that
+ * merely mentioned `curl` was treated as holding that secret. Worse, its
+ * run-block exit test (`lineIndent <= runBlockIndent && !/^\s+/`) could only be
+ * satisfied by a column-0 line, so blocks never ended: the whole file collapsed
+ * into one rolling "block" whose start pointer had moved on to the LAST `run:`
+ * seen. The finding therefore named a step that contained neither the secret
+ * nor, in general, the network call.
+ *
+ * The rule is now evaluated per step, using the workflow AST:
+ *   - a secret is in scope for a step if it is referenced in the step's own
+ *     `run`, in the step's `env:`, in the job's `env:`, or in the workflow-level
+ *     `env:` (all three really are in that step's environment), and
+ *   - the network command must appear in THAT step's `run:` body.
+ * The finding points at the line of the network command inside the step.
  */
 function checkSecretsExfiltration(
-  lines: string[],
+  content: string,
   relativePath: string,
   findings: Finding[],
 ): void {
-  const secretPattern = /\$\{\{\s*secrets\.\w+\s*\}\}/;
-  const networkPattern = /\b(?:curl|wget|fetch|nc|ncat|netcat)\b/;
-  const envExportPattern = /^\s*\w+:\s*\$\{\{\s*secrets\.\w+/;
+  const lines = content.replace(/\r/g, "").split("\n");
 
-  // Track env: blocks that export secrets and subsequent run: blocks
-  let inRunBlock = false;
-  let runBlockStart = -1;
-  let runBlockHasSecrets = false;
-  let runBlockHasNetwork = false;
-  let runBlockIndent = 0;
-
-  // Also track env-exported secrets at step/job level
-  let envSecretsExported = false;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i] ?? "";
-
-    // Check env: blocks for secret exports
-    if (envExportPattern.test(line)) {
-      envSecretsExported = true;
-    }
-
-    // Detect start of run: block
-    const runMatch = /^(\s*)(?:-\s+)?run:\s*[|>]?\s*$/.exec(line);
-    const inlineRunMatch = /^(\s*)(?:-\s+)?run:\s+(.+)$/.exec(line);
-
-    if (runMatch) {
-      inRunBlock = true;
-      runBlockStart = i;
-      runBlockIndent = (runMatch[1] ?? "").length;
-      runBlockHasSecrets = false;
-      runBlockHasNetwork = false;
-      continue;
-    }
-
-    if (inlineRunMatch) {
-      // Single-line run: - already caught by WORKFLOW_PATTERNS
-      inRunBlock = false;
-      continue;
-    }
-
-    if (inRunBlock) {
-      // Check if we've left the block (dedented or empty non-continuation)
-      const lineIndent = line.length - line.trimStart().length;
-      if (line.trim().length > 0 && lineIndent <= runBlockIndent && !/^\s+/.test(line)) {
-        // Exited run block
-        if (runBlockHasSecrets && runBlockHasNetwork) {
-          // Already caught by line-level patterns if on same line;
-          // this catches split across lines
-          const alreadyFound = findings.some(
-            (f) =>
-              (f.rule === "GHA_SECRET_CURL" || f.rule === "GHA_SECRET_WGET") &&
-              f.file === relativePath &&
-              f.line !== undefined &&
-              f.line >= runBlockStart + 1 &&
-              f.line <= i,
-          );
-          if (!alreadyFound) {
-            findings.push({
-              rule: "GHA_SECRET_EXFIL_MULTILINE",
-              description: "Secrets and network commands found in the same run block (potential exfiltration across multiple lines)",
-              severity: "high",
-              file: relativePath,
-              line: runBlockStart + 1,
-              recommendation:
-                "Review this run block. Secrets combined with network commands in the same step can indicate credential exfiltration.",
-            });
-          }
-        }
-        inRunBlock = false;
-      }
-
-      if (inRunBlock) {
-        if (secretPattern.test(line)) runBlockHasSecrets = true;
-        if (networkPattern.test(line)) runBlockHasNetwork = true;
-
-        // Also check if env-exported secrets are used with network
-        if (envSecretsExported && networkPattern.test(line)) {
-          runBlockHasSecrets = true;
-        }
-      }
-    }
+  let ast;
+  try {
+    ast = parseWorkflow(content);
+  } catch {
+    ast = undefined;
   }
 
-  // Handle case where run block extends to end of file
-  if (inRunBlock && runBlockHasSecrets && runBlockHasNetwork) {
+  const envHasSecret = (env?: Record<string, string>): boolean =>
+    env !== undefined && Object.values(env).some((v) => SECRET_EXPR_RE.test(v));
+
+  // Fail closed: a file this parser cannot break into steps still gets the old
+  // coarse file-level check (reported at line 1), so nothing goes undetected.
+  const steps = ast?.jobs.flatMap((job) => job.steps.map((step) => ({ step, job })));
+  if (!steps || steps.length === 0) {
+    if (SECRET_EXPR_RE.test(content) && NETWORK_CMD_RE.test(content)) {
+      pushExfilFinding(findings, relativePath, 1, true);
+    }
+    return;
+  }
+
+  const workflowEnvSecret = envHasSecret(ast?.env);
+  const stepStartLines = steps.map(({ step }) => step.line);
+
+  for (let s = 0; s < steps.length; s++) {
+    const { step, job } = steps[s]!;
+    // Comment-stripped, so a commented-out example is not "runs a network
+    // command" (and matches the line search below).
+    const runCommands = (step.run ?? "")
+      .split("\n")
+      .map((l) => stripYamlComment(l))
+      .join("\n");
+    if (!step.run || !NETWORK_CMD_RE.test(runCommands)) continue;
+
+    const secretInScope =
+      SECRET_EXPR_RE.test(step.run) ||
+      envHasSecret(step.env) ||
+      envHasSecret(job.env) ||
+      workflowEnvSecret;
+    if (!secretInScope) continue;
+
+    // Point at the network command inside this step, not at the step header.
+    const stepEnd = stepStartLines[s + 1] ?? lines.length + 1;
+    let line = step.line;
+    for (let i = step.line - 1; i < stepEnd - 1 && i < lines.length; i++) {
+      if (NETWORK_CMD_RE.test(stripYamlComment(lines[i] ?? ""))) {
+        line = i + 1;
+        break;
+      }
+    }
+
+    // Skip when a line-level rule already reported this exact step.
     const alreadyFound = findings.some(
       (f) =>
         (f.rule === "GHA_SECRET_CURL" || f.rule === "GHA_SECRET_WGET") &&
-        f.file === relativePath,
+        f.file === relativePath &&
+        f.line !== undefined &&
+        f.line >= step.line &&
+        f.line < stepEnd,
     );
-    if (!alreadyFound) {
-      findings.push({
-        rule: "GHA_SECRET_EXFIL_MULTILINE",
-        description: "Secrets and network commands found in the same run block (potential exfiltration across multiple lines)",
-        severity: "high",
-        file: relativePath,
-        line: runBlockStart + 1,
-        recommendation:
-          "Review this run block. Secrets combined with network commands in the same step can indicate credential exfiltration.",
-      });
-    }
+    if (alreadyFound) continue;
+
+    pushExfilFinding(findings, relativePath, line, false);
   }
+}
+
+/** Emit a GHA_SECRET_EXFIL_MULTILINE finding. */
+function pushExfilFinding(
+  findings: Finding[],
+  relativePath: string,
+  line: number,
+  fileLevel: boolean,
+): void {
+  findings.push({
+    rule: "GHA_SECRET_EXFIL_MULTILINE",
+    description: fileLevel
+      ? "Secrets and network commands found in a workflow whose steps could not be parsed (potential exfiltration)"
+      : "A secret is in scope for the same step that runs a network command (potential exfiltration across multiple lines)",
+    severity: "high",
+    file: relativePath,
+    line,
+    recommendation:
+      "Review this step. A secret that is in scope for a step which also makes outbound network calls can be exfiltrated. " +
+      "Scope the secret to the step that needs it and keep network calls in a step without secrets.",
+  });
 }
 
 /**
@@ -548,14 +1257,47 @@ function getWorkflowRecommendation(rule: string): string {
       "Do not use github.head_ref in cache keys for workflows that can be triggered by untrusted PRs. " +
       "Use github.sha or a hash of locked dependency files instead.",
     GHA_ARTIFACT_DOWNLOAD:
-      "Verify that downloaded artifacts originate only from trusted, protected workflows. " +
-      "Consider adding artifact attestation using actions/attest-build-provenance.",
+      "Keep artifact downloads in the current workflow run, link the consumer to the producer through needs, " +
+      "and use trusted triggers. For cross-run or privileged consumption, verify provenance and never execute untrusted content.",
     GHA_SELF_MODIFY:
       "Workflows must not modify their own or other workflow files. This pattern is used by supply chain worms " +
       "to persist malicious code. Investigate immediately and audit recent workflow file changes.",
     GHA_KNOWN_MALICIOUS_SHA:
       "Replace this action immediately and rotate all secrets accessible during builds that used this action. " +
       "File a security incident report and review all build logs for exfiltrated data.",
+    GHA_PRIVILEGED_TRIGGER:
+      "Treat every step in this workflow as running with production privileges. Prefer 'pull_request' over " +
+      "'pull_request_target' for untrusted contributions, set an explicit least-privilege 'permissions:' block, " +
+      "and gate privileged jobs behind manual approval (environments) for first-time contributors.",
+    GHA_PWN_REQUEST_CHECKOUT:
+      "Never check out PR/head code inside a privileged (pull_request_target/workflow_run) workflow. Move build/test " +
+      "of untrusted code to a 'pull_request' workflow (read-only token, no secrets), or split into a privileged job " +
+      "that does NOT run the checked-out code. If you must, gate it behind an environment approval.",
+    GHA_GITHUB_SCRIPT_INJECTION:
+      "Do not interpolate ${{ github.event... }} directly into an actions/github-script 'script:' block - it is eval'd " +
+      "as JavaScript. Pass the value through an env var and read process.env inside the script instead.",
+    GHA_PERMS_WRITE_ALL:
+      "Remove 'permissions: write-all'. Declare the minimal scopes each job needs (e.g. 'contents: read'). Default the " +
+      "top-level permissions to read-only and grant write only where required.",
+    GHA_PERMS_DEFAULT_BROAD:
+      "Add an explicit top-level 'permissions:' block scoped to the minimum (start from 'contents: read'). Privileged " +
+      "triggers should never rely on the repository default token, which is often read+write across all scopes.",
+    GHA_AGENT_UNTRUSTED_PROMPT:
+      "Do not interpolate untrusted event context (github.event.issue/comment/pull_request body or title) " +
+      "into an AI-agent prompt. Pass only sanitized, structured fields, gate the job on author_association, " +
+      "and treat all issue/PR text as untrusted data the agent must never act on as instructions.",
+    GHA_AGENT_PUBLIC_POST:
+      "Remove issues:write / pull-requests:write from any job where an AI agent processes untrusted input, " +
+      "or split the agent (read-only, no public-write token) from the step that posts. An agent that can both " +
+      "read private data and post publicly is a one-step exfiltration channel.",
+    GHA_AGENT_CROSS_REPO_TOKEN:
+      "Scope the agent's token to the single repository it needs. Prefer the default GITHUB_TOKEN or a " +
+      "fine-grained PAT limited to one repo. A broad org/classic PAT lets a prompt-injected agent read every " +
+      "private repo it can reach.",
+    GHA_AGENT_NO_AUTHOR_GATE:
+      "Gate AI-agent jobs triggered by issues/comments on the author's trust level " +
+      "(if: contains(fromJSON('[\"OWNER\",\"MEMBER\",\"COLLABORATOR\"]'), github.event.issue.author_association)) " +
+      "so anonymous external users cannot drive the agent.",
   };
   return map[rule] ?? "Review this finding and assess whether it represents legitimate CI/CD functionality.";
 }
