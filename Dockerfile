@@ -17,7 +17,7 @@
 #   docker buildx imagetools inspect node:22-alpine
 # (the top-level "Digest:" line is the list digest FROM needs).
 
-FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS builder
+FROM node:22-alpine@sha256:b6f26b36c8ff49624cfdac716b8ea1138d606df02586a77d364bb5536a634f85 AS builder
 
 WORKDIR /build
 
@@ -39,7 +39,7 @@ RUN npx tsc
 COPY LICENSE README.md action.yml socket.yml policy-schema.json ./
 RUN npm pack --ignore-scripts --pack-destination /tmp
 
-FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
+FROM node:22-alpine@sha256:b6f26b36c8ff49624cfdac716b8ea1138d606df02586a77d364bb5536a634f85
 
 # unzip extracts .vsix archives in the VS Code extension scanner path; zip is
 # used by tests and kept for parity with the devcontainer.
